@@ -19,6 +19,34 @@ import streamlit as st
 import json as _json
 import datetime as _dt
 
+# ── PLAYER FEATURES MODULE ────────────────────────────────────────────────────
+try:
+    from pitchmind_player_features import (
+        load_deliveries as _load_deliveries,
+        load_matches    as _load_matches,
+        compute_batting_stats,
+        compute_bowling_stats,
+        compute_h2h,
+        search_players,
+    )
+    PLAYER_MODULE_OK = True
+except ImportError:
+    # Try loading from same directory as 6_player_features.py
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    try:
+        from six_player_features import (
+            load_deliveries as _load_deliveries,
+            load_matches    as _load_matches,
+            compute_batting_stats,
+            compute_bowling_stats,
+            compute_h2h,
+            search_players,
+        )
+        PLAYER_MODULE_OK = True
+    except ImportError:
+        PLAYER_MODULE_OK = False
+
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="PitchMind — IPL Predictor",
@@ -78,6 +106,22 @@ def load_models():
 
 df                                 = load_data()
 xgb_model, rf_model, feature_cols = load_models()
+
+@st.cache_data(show_spinner=False)
+def load_player_data():
+    """Load deliveries + batting/bowling stats (cached)."""
+    if not PLAYER_MODULE_OK:
+        return None, None, None
+    del_df     = _load_deliveries()
+    matches_df = _load_matches()
+    if del_df is None:
+        return None, None, None
+    bat_df  = compute_batting_stats(del_df, matches_df)
+    bowl_df = compute_bowling_stats(del_df)
+    return del_df, bat_df, bowl_df
+
+
+del_df, bat_df, bowl_df = load_player_data()
 
 
 # ── HELPER: get team stats from dataset ───────────────────────────────────────
@@ -396,12 +440,428 @@ def render_live_panel(team1_name, team2_name):
     st.markdown("---")
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLAYER SCOUT RENDERER
+# ══════════════════════════════════════════════════════════════════════════════
+def _fmt(val, suffix="", na="—"):
+    """Format a numeric stat safely."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return na
+    return f"{val}{suffix}"
+
+def _color_metric(val, good_high=True, thresholds=(40, 70)):
+    """Return a color based on value and whether higher is better."""
+    if val is None:
+        return "#888"
+    lo, hi = thresholds
+    if good_high:
+        return "#4caf50" if val >= hi else ("#ffa726" if val >= lo else "#ef5350")
+    else:
+        return "#4caf50" if val <= lo else ("#ffa726" if val <= hi else "#ef5350")
+
+def _player_batting_card(player, stats):
+    """Render a compact batting stat card for one player."""
+    if not stats:
+        st.markdown(
+            f"<div style='background:#1e2130;border-radius:8px;padding:10px;"
+            f"margin:4px 0;color:#888;font-size:0.85rem'>"
+            f"🏏 <b>{player}</b> — no batting data found</div>",
+            unsafe_allow_html=True
+        )
+        return
+
+    sr   = stats.get("strike_rate", 0)
+    avg  = stats.get("batting_avg", 0)
+    runs = stats.get("runs", 0)
+    inn  = stats.get("innings", 0)
+
+    pp_sr  = stats.get("pp_sr")
+    mid_sr = stats.get("middle_sr")
+    d_sr   = stats.get("death_sr")
+    r_avg  = stats.get("recent_avg", 0)
+    r_sr   = stats.get("recent_sr", 0)
+    bdry   = stats.get("boundary_pct", 0)
+    dot    = stats.get("dot_ball_pct", 0)
+
+    sr_col  = _color_metric(sr,  good_high=True,  thresholds=(110, 145))
+    avg_col = _color_metric(avg, good_high=True,  thresholds=(20, 35))
+
+    phase_html = ""
+    if pp_sr  is not None: phase_html += f"<span style='color:#90caf9'>PP:{pp_sr:.0f}</span> &nbsp;"
+    if mid_sr is not None: phase_html += f"<span style='color:#a5d6a7'>Mid:{mid_sr:.0f}</span> &nbsp;"
+    if d_sr   is not None: phase_html += f"<span style='color:#ef9a9a'>Death:{d_sr:.0f}</span>"
+
+    st.markdown(
+        f"<div style='background:#1e2130;border-radius:8px;padding:10px 14px;"
+        f"margin:4px 0;border-left:3px solid #1976d2'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+        f"<span style='color:#e0e0e0;font-weight:600'>🏏 {player}</span>"
+        f"<span style='font-size:0.75rem;color:#888'>{inn} innings · {runs} runs</span>"
+        f"</div>"
+        f"<div style='margin-top:6px;display:flex;gap:14px;flex-wrap:wrap'>"
+        f"<span>SR <b style='color:{sr_col}'>{sr:.0f}</b></span>"
+        f"<span>Avg <b style='color:{avg_col}'>{avg:.1f}</b></span>"
+        f"<span>Bdry <b style='color:#ffa726'>{bdry:.0f}%</b></span>"
+        f"<span>Dot <b style='color:#888'>{dot:.0f}%</b></span>"
+        f"<span style='font-size:0.8rem;color:#aaa'>Recent: {r_avg:.0f} avg / {r_sr:.0f} SR</span>"
+        f"</div>"
+        f"<div style='margin-top:4px;font-size:0.78rem'>{phase_html}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+def _player_bowling_card(player, stats):
+    """Render a compact bowling stat card for one player."""
+    if not stats:
+        st.markdown(
+            f"<div style='background:#1e2130;border-radius:8px;padding:10px;"
+            f"margin:4px 0;color:#888;font-size:0.85rem'>"
+            f"🎳 <b>{player}</b> — no bowling data found</div>",
+            unsafe_allow_html=True
+        )
+        return
+
+    econ = stats.get("economy", 0)
+    avg  = stats.get("bowling_avg", 0)
+    wkts = stats.get("wickets", 0)
+    inn  = stats.get("innings", 0)
+    sr   = stats.get("bowling_sr", 0)
+
+    pp_e  = stats.get("pp_economy")
+    mid_e = stats.get("middle_economy")
+    d_e   = stats.get("death_economy")
+    r_e   = stats.get("recent_economy", econ)
+    r_w   = stats.get("recent_wickets", 0)
+    dot   = stats.get("dot_ball_pct", 0)
+
+    econ_col = _color_metric(econ, good_high=False, thresholds=(7.5, 9.5))
+    avg_col  = _color_metric(avg,  good_high=False, thresholds=(22, 35))
+
+    phase_html = ""
+    if pp_e  is not None: phase_html += f"<span style='color:#90caf9'>PP:{pp_e:.1f}</span> &nbsp;"
+    if mid_e is not None: phase_html += f"<span style='color:#a5d6a7'>Mid:{mid_e:.1f}</span> &nbsp;"
+    if d_e   is not None: phase_html += f"<span style='color:#ef9a9a'>Death:{d_e:.1f}</span>"
+
+    st.markdown(
+        f"<div style='background:#1e2130;border-radius:8px;padding:10px 14px;"
+        f"margin:4px 0;border-left:3px solid #e53935'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+        f"<span style='color:#e0e0e0;font-weight:600'>🎳 {player}</span>"
+        f"<span style='font-size:0.75rem;color:#888'>{inn} matches · {wkts} wkts</span>"
+        f"</div>"
+        f"<div style='margin-top:6px;display:flex;gap:14px;flex-wrap:wrap'>"
+        f"<span>Econ <b style='color:{econ_col}'>{econ:.2f}</b></span>"
+        f"<span>Avg <b style='color:{avg_col}'>{avg:.1f}</b></span>"
+        f"<span>SR <b style='color:#ffa726'>{sr:.1f}</b></span>"
+        f"<span>Dot <b style='color:#888'>{dot:.0f}%</b></span>"
+        f"<span style='font-size:0.8rem;color:#aaa'>Recent: {r_e:.1f} econ / {r_w} wkts</span>"
+        f"</div>"
+        f"<div style='margin-top:4px;font-size:0.78rem'>{phase_html}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+def _render_player_scout(team1_name, team2_name):
+    st.markdown("# 🔍 Player Scout")
+    st.markdown(f"**{team1_name}** vs **{team2_name}** — individual player stats from historical data")
+    st.markdown("---")
+
+    if bat_df is None or bowl_df is None:
+        st.error(
+            "❌ Player data not available.\n\n"
+            "Make sure `deliveries_clean.csv` exists in `data/` directory.\n\n"
+            "Run: `python 1_data_cleaning.py` then `python 6_player_features.py`"
+        )
+        return
+
+    bat_lookup  = bat_df.set_index("player").to_dict("index")  if len(bat_df) > 0 else {}
+    bowl_lookup = bowl_df.set_index("player").to_dict("index") if len(bowl_df) > 0 else {}
+
+    # ── Tabs ─────────────────────────────────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs(["📋 Squad Comparison", "🔎 Player Search", "⚔️ Head to Head"])
+
+    # ══════════════════════════════════════════════════════
+    # TAB 1: Squad Comparison — side-by-side XIs
+    # ══════════════════════════════════════════════════════
+    with tab1:
+        # Load playing XIs from live data if available
+        live = load_live_match()
+        xi1_default = live.get("team1_xi", []) if live else []
+        xi2_default = live.get("team2_xi", []) if live else []
+
+        st.markdown("**Enter Playing XIs** (one name per line, or auto-loaded from Live Data)")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            xi1_raw = st.text_area(
+                f"🔵 {team1_name} XI",
+                value="\n".join(xi1_default) if xi1_default else "",
+                height=220,
+                key="scout_xi1",
+                placeholder="e.g.\nRohit Sharma\nV Kohli\n..."
+            )
+        with c2:
+            xi2_raw = st.text_area(
+                f"🔴 {team2_name} XI",
+                value="\n".join(xi2_default) if xi2_default else "",
+                height=220,
+                key="scout_xi2",
+                placeholder="e.g.\nMS Dhoni\nRavindra Jadeja\n..."
+            )
+
+        xi1 = [p.strip() for p in xi1_raw.strip().splitlines() if p.strip()]
+        xi2 = [p.strip() for p in xi2_raw.strip().splitlines() if p.strip()]
+
+        if not xi1 and not xi2:
+            st.info("👆 Enter at least one player name above to see stats. Names must match Cricsheet data exactly (e.g. 'V Kohli', 'RG Sharma').")
+            return
+
+        st.markdown("---")
+
+        # ── Batting Section ──────────────────────────────────────────────────
+        st.markdown('<div class="section-header">🏏 Batting Stats</div>', unsafe_allow_html=True)
+        bc1, bc2 = st.columns(2)
+
+        with bc1:
+            st.markdown(f"**{team1_name}**")
+            if xi1:
+                for p in xi1:
+                    _player_batting_card(p, bat_lookup.get(p, {}))
+            else:
+                st.caption("No players entered")
+
+        with bc2:
+            st.markdown(f"**{team2_name}**")
+            if xi2:
+                for p in xi2:
+                    _player_batting_card(p, bat_lookup.get(p, {}))
+            else:
+                st.caption("No players entered")
+
+        # ── Bowling Section ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown('<div class="section-header">🎳 Bowling Stats</div>', unsafe_allow_html=True)
+        bwc1, bwc2 = st.columns(2)
+
+        with bwc1:
+            st.markdown(f"**{team1_name}**")
+            if xi1:
+                for p in xi1:
+                    _player_bowling_card(p, bowl_lookup.get(p, {}))
+            else:
+                st.caption("No players entered")
+
+        with bwc2:
+            st.markdown(f"**{team2_name}**")
+            if xi2:
+                for p in xi2:
+                    _player_bowling_card(p, bowl_lookup.get(p, {}))
+            else:
+                st.caption("No players entered")
+
+        # ── Summary Table ────────────────────────────────────────────────────
+        if xi1 or xi2:
+            st.markdown("---")
+            st.markdown('<div class="section-header">📊 Summary Table</div>', unsafe_allow_html=True)
+
+            rows = []
+            for team_name, xi in [(team1_name, xi1), (team2_name, xi2)]:
+                for p in xi:
+                    b = bat_lookup.get(p, {})
+                    w = bowl_lookup.get(p, {})
+                    rows.append({
+                        "Team"   : team_name,
+                        "Player" : p,
+                        "Bat SR" : f"{b.get('strike_rate', 0):.0f}" if b else "—",
+                        "Bat Avg": f"{b.get('batting_avg', 0):.1f}" if b else "—",
+                        "Runs"   : int(b.get("runs", 0)) if b else "—",
+                        "Bowl Eco": f"{w.get('economy', 0):.2f}" if w else "—",
+                        "Wkts"   : int(w.get("wickets", 0)) if w else "—",
+                    })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════
+    # TAB 2: Player Search
+    # ══════════════════════════════════════════════════════
+    with tab2:
+        st.markdown("Search any player by name and view their full career stats.")
+
+        search_q = st.text_input("🔎 Search player name", placeholder="e.g. Kohli, Bumrah, Dhoni...")
+
+        if search_q:
+            all_batters  = set(bat_df["player"].unique()) if bat_df is not None and len(bat_df) > 0 else set()
+            all_bowlers  = set(bowl_df["player"].unique()) if bowl_df is not None and len(bowl_df) > 0 else set()
+            all_players  = sorted(all_batters | all_bowlers)
+            matches_list = [p for p in all_players if search_q.lower() in p.lower()]
+
+            if not matches_list:
+                st.warning(f"No players found matching '{search_q}'. Try a shorter name or different spelling.")
+            else:
+                selected = st.selectbox("Select player:", matches_list)
+
+                if selected:
+                    bat_s  = bat_lookup.get(selected, {})
+                    bowl_s = bowl_lookup.get(selected, {})
+
+                    st.markdown(f"### {selected}")
+                    pc1, pc2 = st.columns(2)
+
+                    with pc1:
+                        st.markdown("**🏏 Batting**")
+                        if bat_s:
+                            st.metric("Strike Rate",   f"{bat_s.get('strike_rate', 0):.1f}")
+                            st.metric("Batting Avg",   f"{bat_s.get('batting_avg', 0):.1f}")
+                            st.metric("Total Runs",    str(bat_s.get("runs", 0)))
+                            st.metric("Innings",       str(bat_s.get("innings", 0)))
+                            st.metric("Boundary %",    f"{bat_s.get('boundary_pct', 0):.1f}%")
+                            st.metric("Dot Ball %",    f"{bat_s.get('dot_ball_pct', 0):.1f}%")
+
+                            st.markdown("**Phase Strike Rates**")
+                            ph_cols = st.columns(3)
+                            with ph_cols[0]:
+                                st.metric("Powerplay", f"{bat_s.get('pp_sr') or '—'}")
+                            with ph_cols[1]:
+                                st.metric("Middle",    f"{bat_s.get('middle_sr') or '—'}")
+                            with ph_cols[2]:
+                                st.metric("Death",     f"{bat_s.get('death_sr') or '—'}")
+
+                            st.markdown("**Recent Form (last 5 matches)**")
+                            rf_cols = st.columns(2)
+                            with rf_cols[0]:
+                                st.metric("Avg Runs",    f"{bat_s.get('recent_avg', 0):.1f}")
+                            with rf_cols[1]:
+                                st.metric("Strike Rate", f"{bat_s.get('recent_sr', 0):.1f}")
+                        else:
+                            st.info("No batting data found for this player.")
+
+                    with pc2:
+                        st.markdown("**🎳 Bowling**")
+                        if bowl_s:
+                            st.metric("Economy",       f"{bowl_s.get('economy', 0):.2f}")
+                            st.metric("Bowling Avg",   f"{bowl_s.get('bowling_avg', 0):.1f}")
+                            st.metric("Wickets",       str(bowl_s.get("wickets", 0)))
+                            st.metric("Bowling SR",    f"{bowl_s.get('bowling_sr', 0):.1f}")
+                            st.metric("Dot Ball %",    f"{bowl_s.get('dot_ball_pct', 0):.1f}%")
+                            st.metric("Bdry Conceded", f"{bowl_s.get('boundary_pct_given', 0):.1f}%")
+
+                            st.markdown("**Phase Economy**")
+                            bph_cols = st.columns(3)
+                            with bph_cols[0]:
+                                st.metric("Powerplay", f"{bowl_s.get('pp_economy') or '—'}")
+                            with bph_cols[1]:
+                                st.metric("Middle",    f"{bowl_s.get('middle_economy') or '—'}")
+                            with bph_cols[2]:
+                                st.metric("Death",     f"{bowl_s.get('death_economy') or '—'}")
+
+                            st.markdown("**Recent Form (last 5 matches)**")
+                            rb_cols = st.columns(2)
+                            with rb_cols[0]:
+                                st.metric("Economy",  f"{bowl_s.get('recent_economy', 0):.2f}")
+                            with rb_cols[1]:
+                                st.metric("Wickets",  str(bowl_s.get("recent_wickets", 0)))
+                        else:
+                            st.info("No bowling data found for this player.")
+        else:
+            # Show top batters and bowlers by default
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**🏏 Top 15 Batters by Strike Rate** (min 30 balls)")
+                if bat_df is not None and len(bat_df) > 0:
+                    top_bat = bat_df.nlargest(15, "strike_rate")[
+                        ["player", "innings", "runs", "strike_rate", "batting_avg", "boundary_pct"]
+                    ].rename(columns={
+                        "player": "Player", "innings": "Inn", "runs": "Runs",
+                        "strike_rate": "SR", "batting_avg": "Avg", "boundary_pct": "Bdry%"
+                    })
+                    st.dataframe(top_bat, use_container_width=True, hide_index=True)
+            with col_b:
+                st.markdown("**🎳 Top 15 Bowlers by Economy** (min 30 balls)")
+                if bowl_df is not None and len(bowl_df) > 0:
+                    top_bowl = bowl_df.nsmallest(15, "economy")[
+                        ["player", "innings", "wickets", "economy", "bowling_avg", "bowling_sr"]
+                    ].rename(columns={
+                        "player": "Player", "innings": "Inn", "wickets": "Wkts",
+                        "economy": "Econ", "bowling_avg": "Avg", "bowling_sr": "SR"
+                    })
+                    st.dataframe(top_bowl, use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════
+    # TAB 3: Head to Head Matchups
+    # ══════════════════════════════════════════════════════
+    with tab3:
+        st.markdown("**Batter vs Bowler matchup stats** — minimum 6 balls faced")
+        st.markdown("Enter one batter and one bowler to see their historical matchup.")
+
+        live2 = load_live_match()
+        xi1_h = live2.get("team1_xi", []) if live2 else []
+        xi2_h = live2.get("team2_xi", []) if live2 else []
+
+        all_bat_names  = sorted(bat_df["player"].unique()) if bat_df is not None and len(bat_df) > 0 else []
+        all_bowl_names = sorted(bowl_df["player"].unique()) if bowl_df is not None and len(bowl_df) > 0 else []
+
+        hh_col1, hh_col2 = st.columns(2)
+        with hh_col1:
+            batter_sel = st.selectbox("Select Batter", options=[""] + all_bat_names, key="h2h_batter")
+        with hh_col2:
+            bowler_sel = st.selectbox("Select Bowler", options=[""] + all_bowl_names, key="h2h_bowler")
+
+        if batter_sel and bowler_sel and del_df is not None:
+            h2h_data = compute_h2h(del_df)
+            key = (batter_sel, bowler_sel)
+            stats_h2h = h2h_data.get(key, {})
+
+            if stats_h2h:
+                st.markdown(f"### {batter_sel} vs {bowler_sel}")
+                hmc1, hmc2, hmc3, hmc4 = st.columns(4)
+                with hmc1:
+                    st.metric("Balls Faced", stats_h2h["balls"])
+                with hmc2:
+                    st.metric("Runs Scored", stats_h2h["runs"])
+                with hmc3:
+                    st.metric("Wickets Lost", stats_h2h["wkts"])
+                with hmc4:
+                    sr_h2h = stats_h2h["sr"]
+                    sr_col = _color_metric(sr_h2h, good_high=True, thresholds=(100, 140))
+                    st.markdown(
+                        f"<div style='text-align:center'>"
+                        f"<div style='font-size:0.85rem;color:#888'>Strike Rate</div>"
+                        f"<div style='font-size:1.8rem;font-weight:bold;color:{sr_col}'>{sr_h2h}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+
+                adv = "🏏 **Batter advantage**" if sr_h2h >= 130 else (
+                      "🎳 **Bowler advantage**" if sr_h2h < 100 else "⚖️ **Even matchup**")
+                st.info(adv + f" — {batter_sel} scores at SR {sr_h2h} off {stats_h2h['balls']} balls "
+                              f"({stats_h2h['wkts']} dismissal{'s' if stats_h2h['wkts'] != 1 else ''})")
+            else:
+                st.warning(
+                    f"No matchup data found (need ≥6 balls). "
+                    f"{batter_sel} and {bowler_sel} may not have faced each other in this dataset."
+                )
+        elif batter_sel or bowler_sel:
+            st.info("Select both a batter and a bowler to see their H2H stats.")
+        else:
+            st.info("👆 Select a batter and a bowler above to explore their historical matchup.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🏏 PitchMind")
     st.markdown("### IPL Match Predictor")
+    st.markdown("---")
+
+    # ── Navigation ────────────────────────────────────────────
+    page = st.radio(
+        "📌 Navigate",
+        ["🎯 Match Predictor", "🔍 Player Scout"],
+        label_visibility="collapsed"
+    )
     st.markdown("---")
 
     if df is not None:
@@ -453,243 +913,253 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN AREA
 # ══════════════════════════════════════════════════════════════════════════════
-render_live_panel(team1, team2)
 
-st.markdown("# 🏏 " + team1 + "  **vs**  " + team2)
-st.markdown("📍 **" + venue + "**  &nbsp;|&nbsp;  🪙 **" + toss_winner + "** won toss → chose to **" + toss_decision + "**")
-st.markdown("---")
+if page == "🎯 Match Predictor":
+    render_live_panel(team1, team2)
 
-# Build prediction
-if feature_cols is not None:
-    X_input, s1, s2, h2h, venue_avg = build_feature_vector(
-        team1, team2, venue, toss_winner, toss_decision, df, feature_cols
-    )
-    prob_t1, prob_t2 = predict_winner(X_input)
-else:
-    prob_t1, prob_t2 = 0.5, 0.5
-    s1        = get_team_stats(team1, "team1", venue, df)
-    s2        = get_team_stats(team2, "team2", venue, df)
-    h2h       = 0.5
-    venue_avg = 160.0
+    st.markdown("# 🏏 " + team1 + "  **vs**  " + team2)
+    st.markdown("📍 **" + venue + "**  &nbsp;|&nbsp;  🪙 **" + toss_winner + "** won toss → chose to **" + toss_decision + "**")
+    st.markdown("---")
 
-winner_label = team1 if prob_t1 >= 0.5 else team2
-winner_prob  = max(prob_t1, prob_t2)
-
-# ── WIN PROBABILITY ───────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">🎯 Win Probability</div>', unsafe_allow_html=True)
-
-col1, col2, col3 = st.columns([5, 2, 5])
-with col1:
-    st.markdown(
-        '<div class="win-box-blue">'
-        '<h2 style="margin:0; font-size:1.3rem">' + team1 + '</h2>'
-        '<h1 style="font-size:3.8rem; margin:10px 0">' + f"{prob_t1:.0%}" + '</h1>'
-        '<p style="margin:0; opacity:0.8">Win Probability</p>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-with col2:
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
-    st.markdown("<h2 style='text-align:center; color:#ffa726'>VS</h2>", unsafe_allow_html=True)
-
-with col3:
-    st.markdown(
-        '<div class="win-box-red">'
-        '<h2 style="margin:0; font-size:1.3rem">' + team2 + '</h2>'
-        '<h1 style="font-size:3.8rem; margin:10px 0">' + f"{prob_t2:.0%}" + '</h1>'
-        '<p style="margin:0; opacity:0.8">Win Probability</p>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-# Probability bar
-st.markdown("<br>", unsafe_allow_html=True)
-fig, ax = plt.subplots(figsize=(10, 0.7))
-fig.patch.set_facecolor("#0f1117")
-ax.set_facecolor("#0f1117")
-ax.barh(0, prob_t1, color="#1976d2", height=0.6)
-ax.barh(0, prob_t2, left=prob_t1, color="#e53935", height=0.6)
-ax.text(prob_t1 / 2,           0, f"{prob_t1:.0%}", ha="center", va="center",
-        color="white", fontweight="bold", fontsize=12)
-ax.text(prob_t1 + prob_t2 / 2, 0, f"{prob_t2:.0%}", ha="center", va="center",
-        color="white", fontweight="bold", fontsize=12)
-ax.set_xlim(0, 1)
-ax.axis("off")
-plt.tight_layout(pad=0)
-st.pyplot(fig, use_container_width=True)
-plt.close()
-
-st.success("🏆 **Predicted Winner: " + winner_label + "** with **" + f"{winner_prob:.0%}" + "** confidence")
-st.markdown("---")
-
-
-# ── TEAM COMPARISON ───────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">📊 Team Comparison</div>', unsafe_allow_html=True)
-
-comp = {
-    "Metric": [
-        "Overall Win Rate", "Recent Form (last 5)", "Avg Runs Scored",
-        "Powerplay Runs", "Middle Overs Runs", "Death Overs Runs",
-        "Boundary %", "Dot Ball %", "Run Rate",
-        "Bowling Economy", "Death Economy", "PP Wickets Taken",
-        "Venue Win Rate"
-    ],
-    team1: [
-        f"{s1['win_rate']:.1%}",
-        f"{s1['recent_form']:.1%}",
-        f"{s1['avg_runs']:.0f}",
-        f"{s1['powerplay_runs']:.0f}",
-        f"{s1['middle_runs']:.0f}",
-        f"{s1['death_runs']:.0f}",
-        f"{s1['boundary_pct']:.1%}",
-        f"{s1['dot_ball_pct']:.1%}",
-        f"{s1['run_rate']:.1f}",
-        f"{s1['bowling_economy']:.1f}",
-        f"{s1['death_economy']:.1f}",
-        f"{s1['pp_wickets']:.1f}",
-        f"{s1['venue_win_rate']:.1%}",
-    ],
-    team2: [
-        f"{s2['win_rate']:.1%}",
-        f"{s2['recent_form']:.1%}",
-        f"{s2['avg_runs']:.0f}",
-        f"{s2['powerplay_runs']:.0f}",
-        f"{s2['middle_runs']:.0f}",
-        f"{s2['death_runs']:.0f}",
-        f"{s2['boundary_pct']:.1%}",
-        f"{s2['dot_ball_pct']:.1%}",
-        f"{s2['run_rate']:.1f}",
-        f"{s2['bowling_economy']:.1f}",
-        f"{s2['death_economy']:.1f}",
-        f"{s2['pp_wickets']:.1f}",
-        f"{s2['venue_win_rate']:.1%}",
-    ],
-}
-comp_df = pd.DataFrame(comp).set_index("Metric")
-st.dataframe(comp_df, use_container_width=True)
-st.markdown("---")
-
-
-# ── KEY FACTORS ───────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">⚡ Key Match Factors</div>', unsafe_allow_html=True)
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    if toss_decision == "field":
-        st.info("**🪙 Toss**\n\n✅ " + toss_winner + " chose to field — chasing advantage")
+    # Build prediction
+    if feature_cols is not None:
+        X_input, s1, s2, h2h, venue_avg = build_feature_vector(
+            team1, team2, venue, toss_winner, toss_decision, df, feature_cols
+        )
+        prob_t1, prob_t2 = predict_winner(X_input)
     else:
-        st.info("**🪙 Toss**\n\n⚠️ " + toss_winner + " chose to bat — sets a target")
+        prob_t1, prob_t2 = 0.5, 0.5
+        s1        = get_team_stats(team1, "team1", venue, df)
+        s2        = get_team_stats(team2, "team2", venue, df)
+        h2h       = 0.5
+        venue_avg = 160.0
 
-with col2:
-    if h2h > 0.5:
-        st.info("**📊 Head to Head**\n\n✅ " + team1 + " leads H2H (" + f"{h2h:.0%}" + ")")
-    elif h2h < 0.5:
-        st.info("**📊 Head to Head**\n\n✅ " + team2 + " leads H2H (" + f"{1 - h2h:.0%}" + ")")
-    else:
-        st.info("**📊 Head to Head**\n\nEven record between these teams")
+    winner_label = team1 if prob_t1 >= 0.5 else team2
+    winner_prob  = max(prob_t1, prob_t2)
 
-with col3:
-    wr_diff = s1["win_rate"] - s2["win_rate"]
-    if abs(wr_diff) < 0.05:
-        st.info("**📈 Win Rate**\n\nVery evenly matched teams")
-    elif wr_diff > 0:
-        st.info("**📈 Win Rate**\n\n✅ " + team1 + " has better overall win rate")
-    else:
-        st.info("**📈 Win Rate**\n\n✅ " + team2 + " has better overall win rate")
+    # ── WIN PROBABILITY ───────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">🎯 Win Probability</div>', unsafe_allow_html=True)
 
-st.markdown("---")
+    col1, col2, col3 = st.columns([5, 2, 5])
+    with col1:
+        st.markdown(
+            '<div class="win-box-blue">'
+            '<h2 style="margin:0; font-size:1.3rem">' + team1 + '</h2>'
+            '<h1 style="font-size:3.8rem; margin:10px 0">' + f"{prob_t1:.0%}" + '</h1>'
+            '<p style="margin:0; opacity:0.8">Win Probability</p>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
+    with col2:
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align:center; color:#ffa726'>VS</h2>", unsafe_allow_html=True)
 
-# ── VENUE ANALYSIS ────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">🏟️ Venue Analysis</div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(
+            '<div class="win-box-red">'
+            '<h2 style="margin:0; font-size:1.3rem">' + team2 + '</h2>'
+            '<h1 style="font-size:3.8rem; margin:10px 0">' + f"{prob_t2:.0%}" + '</h1>'
+            '<p style="margin:0; opacity:0.8">Win Probability</p>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Avg Score at Venue", f"{venue_avg:.0f} runs")
-with col2:
-    st.metric(team1 + " Venue Win Rate", f"{s1['venue_win_rate']:.0%}")
-with col3:
-    st.metric(team2 + " Venue Win Rate", f"{s2['venue_win_rate']:.0%}")
-
-st.markdown("---")
-
-
-# ── BAR CHART: BATTING vs BOWLING ─────────────────────────────────────────────
-st.markdown('<div class="section-header">📈 Batting vs Bowling Comparison</div>', unsafe_allow_html=True)
-
-col1, col2 = st.columns(2)
-
-with col1:
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    fig.patch.set_facecolor("#1e2130")
-    ax.set_facecolor("#1e2130")
-    categories = ["Avg Runs", "PP Runs", "Mid Runs", "Death Runs"]
-    v1 = [s1["avg_runs"], s1["powerplay_runs"], s1["middle_runs"], s1["death_runs"]]
-    v2 = [s2["avg_runs"], s2["powerplay_runs"], s2["middle_runs"], s2["death_runs"]]
-    x  = np.arange(len(categories))
-    w  = 0.35
-    ax.bar(x - w/2, v1, w, label=team1, color="#1976d2")
-    ax.bar(x + w/2, v2, w, label=team2, color="#e53935")
-    ax.set_xticks(x)
-    ax.set_xticklabels(categories, color="white", fontsize=9)
-    ax.tick_params(colors="white")
-    ax.legend(fontsize=8, facecolor="#1e2130", labelcolor="white")
-    ax.set_title("Batting Stats", color="white", fontsize=11)
-    for spine in ax.spines.values():
-        spine.set_color("#444")
-    plt.tight_layout()
+    # Probability bar
+    st.markdown("<br>", unsafe_allow_html=True)
+    fig, ax = plt.subplots(figsize=(10, 0.7))
+    fig.patch.set_facecolor("#0f1117")
+    ax.set_facecolor("#0f1117")
+    ax.barh(0, prob_t1, color="#1976d2", height=0.6)
+    ax.barh(0, prob_t2, left=prob_t1, color="#e53935", height=0.6)
+    ax.text(prob_t1 / 2,           0, f"{prob_t1:.0%}", ha="center", va="center",
+            color="white", fontweight="bold", fontsize=12)
+    ax.text(prob_t1 + prob_t2 / 2, 0, f"{prob_t2:.0%}", ha="center", va="center",
+            color="white", fontweight="bold", fontsize=12)
+    ax.set_xlim(0, 1)
+    ax.axis("off")
+    plt.tight_layout(pad=0)
     st.pyplot(fig, use_container_width=True)
     plt.close()
 
-with col2:
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    fig.patch.set_facecolor("#1e2130")
-    ax.set_facecolor("#1e2130")
-    categories = ["Economy", "Death Econ", "PP Wickets"]
-    v1 = [s1["bowling_economy"], s1["death_economy"], s1["pp_wickets"]]
-    v2 = [s2["bowling_economy"], s2["death_economy"], s2["pp_wickets"]]
-    x  = np.arange(len(categories))
-    w  = 0.35
-    ax.bar(x - w/2, v1, w, label=team1, color="#1976d2")
-    ax.bar(x + w/2, v2, w, label=team2, color="#e53935")
-    ax.set_xticks(x)
-    ax.set_xticklabels(categories, color="white", fontsize=9)
-    ax.tick_params(colors="white")
-    ax.legend(fontsize=8, facecolor="#1e2130", labelcolor="white")
-    ax.set_title("Bowling Stats", color="white", fontsize=11)
-    for spine in ax.spines.values():
-        spine.set_color("#444")
-    plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-    plt.close()
-
-st.markdown("---")
+    st.success("🏆 **Predicted Winner: " + winner_label + "** with **" + f"{winner_prob:.0%}" + "** confidence")
+    st.markdown("---")
 
 
-# ── ABOUT MODEL ───────────────────────────────────────────────────────────────
-with st.expander("ℹ️ About This Model"):
-    st.markdown("""
-    **Model:** XGBoost + Random Forest Ensemble (averaged probabilities)
+    # ── TEAM COMPARISON ───────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">📊 Team Comparison</div>', unsafe_allow_html=True)
 
-    **45 Features used:**
-    - Team win rates, recent form (last 5), head-to-head record, NRR
-    - Avg runs, powerplay runs, **middle overs runs**, death overs runs
-    - Run rate, top-3 batsman strike rate, boundary %, **dot ball %**
-    - Bowling economy, death economy, PP wickets taken
-    - Venue win rates, venue average runs
-    - Toss win, toss decision, toss + field combination
-    - **10 difference features** (team1 vs team2 relative advantage)
+    comp = {
+        "Metric": [
+            "Overall Win Rate", "Recent Form (last 5)", "Avg Runs Scored",
+            "Powerplay Runs", "Middle Overs Runs", "Death Overs Runs",
+            "Boundary %", "Dot Ball %", "Run Rate",
+            "Bowling Economy", "Death Economy", "PP Wickets Taken",
+            "Venue Win Rate"
+        ],
+        team1: [
+            f"{s1['win_rate']:.1%}",
+            f"{s1['recent_form']:.1%}",
+            f"{s1['avg_runs']:.0f}",
+            f"{s1['powerplay_runs']:.0f}",
+            f"{s1['middle_runs']:.0f}",
+            f"{s1['death_runs']:.0f}",
+            f"{s1['boundary_pct']:.1%}",
+            f"{s1['dot_ball_pct']:.1%}",
+            f"{s1['run_rate']:.1f}",
+            f"{s1['bowling_economy']:.1f}",
+            f"{s1['death_economy']:.1f}",
+            f"{s1['pp_wickets']:.1f}",
+            f"{s1['venue_win_rate']:.1%}",
+        ],
+        team2: [
+            f"{s2['win_rate']:.1%}",
+            f"{s2['recent_form']:.1%}",
+            f"{s2['avg_runs']:.0f}",
+            f"{s2['powerplay_runs']:.0f}",
+            f"{s2['middle_runs']:.0f}",
+            f"{s2['death_runs']:.0f}",
+            f"{s2['boundary_pct']:.1%}",
+            f"{s2['dot_ball_pct']:.1%}",
+            f"{s2['run_rate']:.1f}",
+            f"{s2['bowling_economy']:.1f}",
+            f"{s2['death_economy']:.1f}",
+            f"{s2['pp_wickets']:.1f}",
+            f"{s2['venue_win_rate']:.1%}",
+        ],
+    }
+    comp_df = pd.DataFrame(comp).set_index("Metric")
+    st.dataframe(comp_df, use_container_width=True)
+    st.markdown("---")
 
-    **Dataset:** IPL 2008–2025 | ~1,169 matches
 
-    **Training:** Time-aware split — trained on older seasons, tested on 2024–2025
+    # ── KEY FACTORS ───────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">⚡ Key Match Factors</div>', unsafe_allow_html=True)
 
-    **Limitations:**
-    - Does not account for player injuries or playing XI composition
-    - Cannot predict rain interruptions or pitch deterioration mid-game
-    """)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if toss_decision == "field":
+            st.info("**🪙 Toss**\n\n✅ " + toss_winner + " chose to field — chasing advantage")
+        else:
+            st.info("**🪙 Toss**\n\n⚠️ " + toss_winner + " chose to bat — sets a target")
 
+    with col2:
+        if h2h > 0.5:
+            st.info("**📊 Head to Head**\n\n✅ " + team1 + " leads H2H (" + f"{h2h:.0%}" + ")")
+        elif h2h < 0.5:
+            st.info("**📊 Head to Head**\n\n✅ " + team2 + " leads H2H (" + f"{1 - h2h:.0%}" + ")")
+        else:
+            st.info("**📊 Head to Head**\n\nEven record between these teams")
+
+    with col3:
+        wr_diff = s1["win_rate"] - s2["win_rate"]
+        if abs(wr_diff) < 0.05:
+            st.info("**📈 Win Rate**\n\nVery evenly matched teams")
+        elif wr_diff > 0:
+            st.info("**📈 Win Rate**\n\n✅ " + team1 + " has better overall win rate")
+        else:
+            st.info("**📈 Win Rate**\n\n✅ " + team2 + " has better overall win rate")
+
+    st.markdown("---")
+
+
+    # ── VENUE ANALYSIS ────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">🏟️ Venue Analysis</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Avg Score at Venue", f"{venue_avg:.0f} runs")
+    with col2:
+        st.metric(team1 + " Venue Win Rate", f"{s1['venue_win_rate']:.0%}")
+    with col3:
+        st.metric(team2 + " Venue Win Rate", f"{s2['venue_win_rate']:.0%}")
+
+    st.markdown("---")
+
+
+    # ── BAR CHART: BATTING vs BOWLING ─────────────────────────────────────────────
+    st.markdown('<div class="section-header">📈 Batting vs Bowling Comparison</div>', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        fig.patch.set_facecolor("#1e2130")
+        ax.set_facecolor("#1e2130")
+        categories = ["Avg Runs", "PP Runs", "Mid Runs", "Death Runs"]
+        v1 = [s1["avg_runs"], s1["powerplay_runs"], s1["middle_runs"], s1["death_runs"]]
+        v2 = [s2["avg_runs"], s2["powerplay_runs"], s2["middle_runs"], s2["death_runs"]]
+        x  = np.arange(len(categories))
+        w  = 0.35
+        ax.bar(x - w/2, v1, w, label=team1, color="#1976d2")
+        ax.bar(x + w/2, v2, w, label=team2, color="#e53935")
+        ax.set_xticks(x)
+        ax.set_xticklabels(categories, color="white", fontsize=9)
+        ax.tick_params(colors="white")
+        ax.legend(fontsize=8, facecolor="#1e2130", labelcolor="white")
+        ax.set_title("Batting Stats", color="white", fontsize=11)
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+        plt.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close()
+
+    with col2:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        fig.patch.set_facecolor("#1e2130")
+        ax.set_facecolor("#1e2130")
+        categories = ["Economy", "Death Econ", "PP Wickets"]
+        v1 = [s1["bowling_economy"], s1["death_economy"], s1["pp_wickets"]]
+        v2 = [s2["bowling_economy"], s2["death_economy"], s2["pp_wickets"]]
+        x  = np.arange(len(categories))
+        w  = 0.35
+        ax.bar(x - w/2, v1, w, label=team1, color="#1976d2")
+        ax.bar(x + w/2, v2, w, label=team2, color="#e53935")
+        ax.set_xticks(x)
+        ax.set_xticklabels(categories, color="white", fontsize=9)
+        ax.tick_params(colors="white")
+        ax.legend(fontsize=8, facecolor="#1e2130", labelcolor="white")
+        ax.set_title("Bowling Stats", color="white", fontsize=11)
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+        plt.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close()
+
+    st.markdown("---")
+
+
+    # ── ABOUT MODEL ───────────────────────────────────────────────────────────────
+    with st.expander("ℹ️ About This Model"):
+        st.markdown("""
+        **Model:** XGBoost + Random Forest Ensemble (averaged probabilities)
+
+        **45 Features used:**
+        - Team win rates, recent form (last 5), head-to-head record, NRR
+        - Avg runs, powerplay runs, **middle overs runs**, death overs runs
+        - Run rate, top-3 batsman strike rate, boundary %, **dot ball %**
+        - Bowling economy, death economy, PP wickets taken
+        - Venue win rates, venue average runs
+        - Toss win, toss decision, toss + field combination
+        - **10 difference features** (team1 vs team2 relative advantage)
+
+        **Dataset:** IPL 2008–2025 | ~1,169 matches
+
+        **Training:** Time-aware split — trained on older seasons, tested on 2024–2025
+
+        **Limitations:**
+        - Does not account for player injuries or playing XI composition
+        - Cannot predict rain interruptions or pitch deterioration mid-game
+        """)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLAYER SCOUT PAGE
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🔍 Player Scout":
+    _render_player_scout(team1, team2)
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
