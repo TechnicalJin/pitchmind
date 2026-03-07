@@ -1,6 +1,6 @@
 PITCHMIND — IPL Model Training Results
 ========================================
-Random Forest Accuracy : 52.61%
-XGBoost Accuracy       : 52.17%
-Ensemble Accuracy      : 51.74%
+Random Forest Accuracy : 71.56%
+XGBoost Accuracy       : 72.17%
+Ensemble Accuracy      : 72.27%
 Features Used          : 47
