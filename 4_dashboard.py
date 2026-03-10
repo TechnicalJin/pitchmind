@@ -82,6 +82,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ── DATA CLEANING HELPER ──────────────────────────────────────────────────────
+def clean_dataframe(df):
+    """Replace dash placeholders with None and coerce numeric columns."""
+    df = df.replace(["\u2014", "\u2013", "\u2012", "\u2010", "\u2015",
+                     "-", "\u2212", ""], None)
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="ignore")
+    return df
+
+
 # ── LOAD DATA & MODELS ────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
@@ -674,14 +684,15 @@ def _render_player_scout(team1_name, team2_name):
                     rows.append({
                         "Team"   : team_name,
                         "Player" : p,
-                        "Bat SR" : f"{b.get('strike_rate', 0):.0f}" if b else "—",
-                        "Bat Avg": f"{b.get('batting_avg', 0):.1f}" if b else "—",
-                        "Runs"   : int(b.get("runs", 0)) if b else "—",
-                        "Bowl Eco": f"{w.get('economy', 0):.2f}" if w else "—",
-                        "Wkts"   : int(w.get("wickets", 0)) if w else "—",
+                        "Bat SR" : f"{b.get('strike_rate', 0):.0f}" if b else None,
+                        "Bat Avg": f"{b.get('batting_avg', 0):.1f}" if b else None,
+                        "Runs"   : int(b.get("runs", 0)) if b else None,
+                        "Bowl Eco": f"{w.get('economy', 0):.2f}" if w else None,
+                        "Wkts"   : int(w.get("wickets", 0)) if w else None,
                     })
             if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                _summary_df = clean_dataframe(pd.DataFrame(rows))
+                st.dataframe(_summary_df, width="stretch", hide_index=True)
 
     # ══════════════════════════════════════════════════════
     # TAB 2: Player Search
@@ -776,7 +787,8 @@ def _render_player_scout(team1_name, team2_name):
                         "player": "Player", "innings": "Inn", "runs": "Runs",
                         "strike_rate": "SR", "batting_avg": "Avg", "boundary_pct": "Bdry%"
                     })
-                    st.dataframe(top_bat, use_container_width=True, hide_index=True)
+                    top_bat = clean_dataframe(top_bat)
+                    st.dataframe(top_bat, width="stretch", hide_index=True)
             with col_b:
                 st.markdown("**🎳 Top 15 Bowlers by Economy** (min 30 balls)")
                 if bowl_df is not None and len(bowl_df) > 0:
@@ -786,7 +798,8 @@ def _render_player_scout(team1_name, team2_name):
                         "player": "Player", "innings": "Inn", "wickets": "Wkts",
                         "economy": "Econ", "bowling_avg": "Avg", "bowling_sr": "SR"
                     })
-                    st.dataframe(top_bowl, use_container_width=True, hide_index=True)
+                    top_bowl = clean_dataframe(top_bowl)
+                    st.dataframe(top_bowl, width="stretch", hide_index=True)
 
     # ══════════════════════════════════════════════════════
     # TAB 3: Head to Head Matchups
@@ -894,7 +907,7 @@ with st.sidebar:
     st.markdown("---")
     predict_btn = st.button(
         "🎯 PREDICT WINNER",
-        use_container_width=True,
+        width="stretch",
         type="primary"
     )
 
@@ -979,7 +992,7 @@ if page == "🎯 Match Predictor":
     ax.set_xlim(0, 1)
     ax.axis("off")
     plt.tight_layout(pad=0)
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close()
 
     st.success("🏆 **Predicted Winner: " + winner_label + "** with **" + f"{winner_prob:.0%}" + "** confidence")
@@ -1029,7 +1042,8 @@ if page == "🎯 Match Predictor":
         ],
     }
     comp_df = pd.DataFrame(comp).set_index("Metric")
-    st.dataframe(comp_df, use_container_width=True)
+    comp_df = clean_dataframe(comp_df)
+    st.dataframe(comp_df, width="stretch")
     st.markdown("---")
 
 
@@ -1101,7 +1115,7 @@ if page == "🎯 Match Predictor":
         for spine in ax.spines.values():
             spine.set_color("#444")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close()
 
     with col2:
@@ -1123,7 +1137,7 @@ if page == "🎯 Match Predictor":
         for spine in ax.spines.values():
             spine.set_color("#444")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close()
 
     st.markdown("---")
