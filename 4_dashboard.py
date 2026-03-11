@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import json as _json
 import datetime as _dt
+from live_match_tab import render_live_match_tab
 
 # ── PLAYER FEATURES MODULE ────────────────────────────────────────────────────
 try:
@@ -872,7 +873,7 @@ with st.sidebar:
     # ── Navigation ────────────────────────────────────────────
     page = st.radio(
         "📌 Navigate",
-        ["🎯 Match Predictor", "🔍 Player Scout"],
+        ["🔴 Live Match", "🎯 Match Predictor", "🔍 Player Scout"],
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -927,7 +928,10 @@ with st.sidebar:
 # MAIN AREA
 # ══════════════════════════════════════════════════════════════════════════════
 
-if page == "🎯 Match Predictor":
+if page == "🔴 Live Match":
+    render_live_match_tab()
+
+elif page == "🎯 Match Predictor":
     render_live_panel(team1, team2)
 
     st.markdown("# 🏏 " + team1 + "  **vs**  " + team2)
