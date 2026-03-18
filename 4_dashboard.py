@@ -14,17 +14,27 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 import joblib
+import matplotlib
+matplotlib.use("Agg")          # must be before pyplot import for Streamlit
 import matplotlib.pyplot as plt
 import streamlit as st
 import json as _json
 import datetime as _dt
 from live_match_tab import render_live_match_tab
 
+# ── SHAP ──────────────────────────────────────────────────────────────────────
+try:
+    import shap
+    SHAP_OK = True
+except ImportError:
+    SHAP_OK = False
+
 # ── PLAYER FEATURES MODULE ────────────────────────────────────────────────────
 try:
     from pitchmind_player_features import (
-        load_deliveries as _load_deliveries,
-        load_matches    as _load_matches,
+        load_deliveries  as _load_deliveries,
+        load_matches     as _load_matches,
+        get_all_player_stats,       # NEW v2 cached entry point
         compute_batting_stats,
         compute_bowling_stats,
         compute_h2h,
@@ -32,13 +42,13 @@ try:
     )
     PLAYER_MODULE_OK = True
 except ImportError:
-    # Try loading from same directory as 6_player_features.py
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
     try:
         from six_player_features import (
-            load_deliveries as _load_deliveries,
-            load_matches    as _load_matches,
+            load_deliveries  as _load_deliveries,
+            load_matches     as _load_matches,
+            get_all_player_stats,
             compute_batting_stats,
             compute_bowling_stats,
             compute_h2h,
@@ -46,6 +56,12 @@ except ImportError:
         )
         PLAYER_MODULE_OK = True
     except ImportError:
+        # Final fallback: stub so dashboard runs without player module
+        def get_all_player_stats(*a, **kw): return None, None
+        def compute_batting_stats(*a, **kw): return None
+        def compute_bowling_stats(*a, **kw): return None
+        def compute_h2h(*a, **kw): return {}
+        def search_players(*a, **kw): return []
         PLAYER_MODULE_OK = False
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
@@ -107,28 +123,54 @@ def load_models():
     xgb_path  = os.path.join("models", "ipl_model.pkl")
     rf_path   = os.path.join("models", "ipl_model_rf.pkl")
     feat_path = os.path.join("models", "feature_cols.pkl")
-    if not os.path.exists(xgb_path) or not os.path.exists(feat_path):
-        return None, None, None
-    xgb_model    = joblib.load(xgb_path)
-    rf_model     = joblib.load(rf_path) if os.path.exists(rf_path) else None
-    feature_cols = joblib.load(feat_path)
-    return xgb_model, rf_model, feature_cols
+    if not os.path.exists(xgb_path):
+        return None, None, None, None
+
+    xgb_model = joblib.load(xgb_path)
+    rf_model  = joblib.load(rf_path) if os.path.exists(rf_path) else None
+
+    # ── Feature cols: always read from XGBoost booster (ground truth) ─────────
+    # The booster stores the exact 47 feature names the model was trained on.
+    # This is more reliable than feature_cols.pkl which may be outdated or
+    # be the wrong pkl (e.g. phase_feature_cols.pkl has only 13 features).
+    try:
+        feature_cols = xgb_model.get_booster().feature_names
+        if feature_cols is None:
+            raise ValueError("no names in booster")
+    except Exception:
+        # fallback to pkl file only if booster names unavailable
+        if os.path.exists(feat_path):
+            feature_cols = joblib.load(feat_path)
+        else:
+            return xgb_model, rf_model, None, None
+
+    # ── Build SHAP TreeExplainer once and cache ────────────────────────────────
+    # TreeExplainer is exact for tree models — no sampling approximation.
+    # Building it once at startup means per-prediction SHAP is near-instant.
+    shap_explainer = None
+    if SHAP_OK:
+        try:
+            shap_explainer = shap.TreeExplainer(xgb_model)
+        except Exception:
+            shap_explainer = None
+
+    return xgb_model, rf_model, feature_cols, shap_explainer
 
 
-df                                 = load_data()
-xgb_model, rf_model, feature_cols = load_models()
+df                                              = load_data()
+xgb_model, rf_model, feature_cols, shap_explainer = load_models()
 
 @st.cache_data(show_spinner=False)
 def load_player_data():
-    """Load deliveries + batting/bowling stats (cached)."""
+    """Load deliveries + batting/bowling stats via Group-3 cache (one-shot compute)."""
     if not PLAYER_MODULE_OK:
         return None, None, None
     del_df     = _load_deliveries()
     matches_df = _load_matches()
     if del_df is None:
         return None, None, None
-    bat_df  = compute_batting_stats(del_df, matches_df)
-    bowl_df = compute_bowling_stats(del_df)
+    # get_all_player_stats computes once and caches at module level (Group 3 fix)
+    bat_df, bowl_df = get_all_player_stats(del_df, matches_df)
     return del_df, bat_df, bowl_df
 
 
@@ -137,7 +179,15 @@ del_df, bat_df, bowl_df = load_player_data()
 
 # ── HELPER: get team stats from dataset ───────────────────────────────────────
 def get_team_stats(team, role, venue, df):
+    """
+    Pull all per-team stats from master_features.csv for the most recent row.
+    FIXED (v3): now includes all 17 Group-1 features added in 2_feature_engineering.py v4:
+      - chase_win_rate, home_win_rate, win_streak, days_rest  (Change 6)
+      - squad_bat_sr, squad_bowl_econ, squad_allrounder       (Change 2)
+    Defaults are neutral/average values used when data is unavailable.
+    """
     default = {
+        # original 16 features
         "win_rate": 0.5, "recent_form": 0.5, "nrr": 0.0,
         "avg_runs": 155.0, "powerplay_runs": 45.0, "middle_runs": 55.0,
         "death_runs": 40.0, "boundary_pct": 0.16, "dot_ball_pct": 0.35,
@@ -145,6 +195,15 @@ def get_team_stats(team, role, venue, df):
         "bowling_economy": 8.5, "death_economy": 9.5,
         "pp_wickets": 1.5, "bowling_sr": 20.0,
         "venue_win_rate": 0.5,
+        # NEW Group 1 Change 6: contextual rolling features
+        "chase_win_rate":   0.5,
+        "home_win_rate":    0.5,
+        "win_streak":       0.0,
+        "days_rest":        7.0,
+        # NEW Group 1 Change 2: squad-level proxy features
+        "squad_bat_sr":     125.0,
+        "squad_bowl_econ":    8.5,
+        "squad_allrounder":   2.0,
     }
     if df is None:
         return default
@@ -160,23 +219,40 @@ def get_team_stats(team, role, venue, df):
     vwr = venue_sub[f"{role}_venue_win_rate"].mean() if len(venue_sub) > 0 \
           else sub[f"{role}_venue_win_rate"].mean()
 
+    def _get(key, fallback):
+        val = r.get(key, fallback)
+        try:
+            return fallback if (isinstance(val, float) and np.isnan(val)) else val
+        except (TypeError, ValueError):
+            return fallback
+
     return {
-        "win_rate":        r.get(f"{role}_win_rate",        0.5),
-        "recent_form":     r.get(f"{role}_recent_form",     0.5),
-        "nrr":             r.get(f"{role}_nrr",             0.0),
-        "avg_runs":        r.get(f"{role}_avg_runs",        155.0),
-        "powerplay_runs":  r.get(f"{role}_powerplay_runs",  45.0),
-        "middle_runs":     r.get(f"{role}_middle_runs",     55.0),
-        "death_runs":      r.get(f"{role}_death_runs",      40.0),
-        "boundary_pct":    r.get(f"{role}_boundary_pct",    0.16),
-        "dot_ball_pct":    r.get(f"{role}_dot_ball_pct",    0.35),
-        "run_rate":        r.get(f"{role}_run_rate",        8.0),
-        "top3_sr":         r.get(f"{role}_top3_sr",         117.0),
-        "bowling_economy": r.get(f"{role}_bowling_economy", 8.5),
-        "death_economy":   r.get(f"{role}_death_economy",   9.5),
-        "pp_wickets":      r.get(f"{role}_pp_wickets",      1.5),
-        "bowling_sr":      r.get(f"{role}_bowling_sr",      20.0),
-        "venue_win_rate":  float(vwr) if not np.isnan(float(vwr)) else 0.5,
+        # ── Original 16 features ─────────────────────────────────────────────
+        "win_rate":         _get(f"{role}_win_rate",        0.5),
+        "recent_form":      _get(f"{role}_recent_form",     0.5),
+        "nrr":              _get(f"{role}_nrr",             0.0),
+        "avg_runs":         _get(f"{role}_avg_runs",        155.0),
+        "powerplay_runs":   _get(f"{role}_powerplay_runs",  45.0),
+        "middle_runs":      _get(f"{role}_middle_runs",     55.0),
+        "death_runs":       _get(f"{role}_death_runs",      40.0),
+        "boundary_pct":     _get(f"{role}_boundary_pct",    0.16),
+        "dot_ball_pct":     _get(f"{role}_dot_ball_pct",    0.35),
+        "run_rate":         _get(f"{role}_run_rate",        8.0),
+        "top3_sr":          _get(f"{role}_top3_sr",         117.0),
+        "bowling_economy":  _get(f"{role}_bowling_economy", 8.5),
+        "death_economy":    _get(f"{role}_death_economy",   9.5),
+        "pp_wickets":       _get(f"{role}_pp_wickets",      1.5),
+        "bowling_sr":       _get(f"{role}_bowling_sr",      20.0),
+        "venue_win_rate":   float(vwr) if not np.isnan(float(vwr)) else 0.5,
+        # ── NEW Group 1 Change 6: contextual features ─────────────────────────
+        "chase_win_rate":   _get(f"{role}_chase_win_rate",  0.5),
+        "home_win_rate":    _get(f"{role}_home_win_rate",   0.5),
+        "win_streak":       _get(f"{role}_win_streak",      0.0),
+        "days_rest":        _get(f"{role}_days_rest",       7.0),
+        # ── NEW Group 1 Change 2: squad-level features ────────────────────────
+        "squad_bat_sr":     _get(f"{role}_squad_bat_sr",    125.0),
+        "squad_bowl_econ":  _get(f"{role}_squad_bowl_econ",   8.5),
+        "squad_allrounder": _get(f"{role}_squad_allrounder",  2.0),
     }
 
 
@@ -208,6 +284,7 @@ def build_feature_vector(team1, team2, venue, toss_winner, toss_decision, df, fe
             venue_avg = v
 
     feat = {
+        # ── Team stats: original 32 ───────────────────────────────────────────
         "team1_win_rate":        s1["win_rate"],
         "team2_win_rate":        s2["win_rate"],
         "team1_recent_form":     s1["recent_form"],
@@ -241,10 +318,29 @@ def build_feature_vector(team1, team2, venue, toss_winner, toss_decision, df, fe
         "team2_bowling_sr":      s2["bowling_sr"],
         "team1_venue_win_rate":  s1["venue_win_rate"],
         "team2_venue_win_rate":  s2["venue_win_rate"],
+        # ── Venue & toss ─────────────────────────────────────────────────────
         "venue_avg_runs":        venue_avg,
         "toss_win":              toss_win,
         "toss_field":            toss_field,
         "toss_team1_field":      toss_team1_field,
+        # ── NEW Group 1 Change 6: contextual rolling features ─────────────────
+        "team1_chase_win_rate":  s1["chase_win_rate"],
+        "team2_chase_win_rate":  s2["chase_win_rate"],
+        "team1_home_win_rate":   s1["home_win_rate"],
+        "team2_home_win_rate":   s2["home_win_rate"],
+        "team1_win_streak":      s1["win_streak"],
+        "team2_win_streak":      s2["win_streak"],
+        "team1_days_rest":       s1["days_rest"],
+        "team2_days_rest":       s2["days_rest"],
+        "season_stage":          0,    # 0=group stage; override to 1 for playoff if known
+        # ── NEW Group 1 Change 2: squad-level features ────────────────────────
+        "team1_squad_bat_sr":    s1["squad_bat_sr"],
+        "team2_squad_bat_sr":    s2["squad_bat_sr"],
+        "team1_squad_bowl_econ": s1["squad_bowl_econ"],
+        "team2_squad_bowl_econ": s2["squad_bowl_econ"],
+        "team1_squad_allrounder":s1["squad_allrounder"],
+        "team2_squad_allrounder":s2["squad_allrounder"],
+        # ── Difference features: original 10 ─────────────────────────────────
         "diff_win_rate":         s1["win_rate"]        - s2["win_rate"],
         "diff_recent_form":      s1["recent_form"]     - s2["recent_form"],
         "diff_avg_runs":         s1["avg_runs"]        - s2["avg_runs"],
@@ -255,6 +351,9 @@ def build_feature_vector(team1, team2, venue, toss_winner, toss_decision, df, fe
         "diff_run_rate":         s1["run_rate"]        - s2["run_rate"],
         "diff_nrr":              s1["nrr"]             - s2["nrr"],
         "diff_venue_win_rate":   s1["venue_win_rate"]  - s2["venue_win_rate"],
+        # ── NEW difference features ───────────────────────────────────────────
+        "diff_chase_win_rate":   s1["chase_win_rate"]  - s2["chase_win_rate"],
+        "diff_squad_bat_sr":     s1["squad_bat_sr"]    - s2["squad_bat_sr"],
     }
 
     return pd.DataFrame([feat])[feature_cols], s1, s2, h2h, venue_avg
@@ -863,6 +962,285 @@ def _render_player_scout(team1_name, team2_name):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SHAP EXPLAINABILITY  (NEW — Group 4 change)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Human-readable labels for every feature (shown in SHAP chart)
+FEATURE_LABELS = {
+    "team1_win_rate":        "T1 Overall Win Rate",
+    "team2_win_rate":        "T2 Overall Win Rate",
+    "team1_recent_form":     "T1 Recent Form (last 5)",
+    "team2_recent_form":     "T2 Recent Form (last 5)",
+    "h2h_win_rate":          "Head-to-Head Win Rate",
+    "team1_nrr":             "T1 Net Run Rate",
+    "team2_nrr":             "T2 Net Run Rate",
+    "team1_avg_runs":        "T1 Avg Runs Scored",
+    "team2_avg_runs":        "T2 Avg Runs Scored",
+    "team1_powerplay_runs":  "T1 Powerplay Runs",
+    "team2_powerplay_runs":  "T2 Powerplay Runs",
+    "team1_middle_runs":     "T1 Middle Overs Runs",
+    "team2_middle_runs":     "T2 Middle Overs Runs",
+    "team1_death_runs":      "T1 Death Overs Runs",
+    "team2_death_runs":      "T2 Death Overs Runs",
+    "team1_boundary_pct":    "T1 Boundary %",
+    "team2_boundary_pct":    "T2 Boundary %",
+    "team1_dot_ball_pct":    "T1 Dot Ball %",
+    "team2_dot_ball_pct":    "T2 Dot Ball %",
+    "team1_run_rate":        "T1 Run Rate",
+    "team2_run_rate":        "T2 Run Rate",
+    "team1_top3_sr":         "T1 Top-3 Batter SR",
+    "team2_top3_sr":         "T2 Top-3 Batter SR",
+    "team1_bowling_economy": "T1 Bowling Economy",
+    "team2_bowling_economy": "T2 Bowling Economy",
+    "team1_death_economy":   "T1 Death Economy",
+    "team2_death_economy":   "T2 Death Economy",
+    "team1_pp_wickets":      "T1 PP Wickets Taken",
+    "team2_pp_wickets":      "T2 PP Wickets Taken",
+    "team1_bowling_sr":      "T1 Bowling Strike Rate",
+    "team2_bowling_sr":      "T2 Bowling Strike Rate",
+    "team1_venue_win_rate":  "T1 Venue Win Rate",
+    "team2_venue_win_rate":  "T2 Venue Win Rate",
+    "venue_avg_runs":        "Venue Avg Score",
+    "toss_win":              "T1 Won Toss",
+    "toss_field":            "Toss Winner Chose Field",
+    "toss_team1_field":      "T1 Won Toss & Chose Field",
+    "diff_win_rate":         "Win Rate Advantage (T1−T2)",
+    "diff_recent_form":      "Recent Form Advantage (T1−T2)",
+    "diff_avg_runs":         "Avg Runs Advantage (T1−T2)",
+    "diff_death_runs":       "Death Runs Advantage (T1−T2)",
+    "diff_death_economy":    "Death Economy Advantage (T2−T1)",
+    "diff_bowling_economy":  "Economy Advantage (T2−T1)",
+    "diff_pp_wickets":       "PP Wickets Advantage (T1−T2)",
+    "diff_run_rate":         "Run Rate Advantage (T1−T2)",
+    "diff_nrr":              "NRR Advantage (T1−T2)",
+    "diff_venue_win_rate":   "Venue Win Rate Advantage (T1−T2)",
+    # ── NEW Group 1 Change 6: contextual features ─────────────────────────────
+    "team1_chase_win_rate":  "T1 Chase Win Rate",
+    "team2_chase_win_rate":  "T2 Chase Win Rate",
+    "team1_home_win_rate":   "T1 Home Win Rate",
+    "team2_home_win_rate":   "T2 Home Win Rate",
+    "team1_win_streak":      "T1 Win Streak",
+    "team2_win_streak":      "T2 Win Streak",
+    "team1_days_rest":       "T1 Days Since Last Match",
+    "team2_days_rest":       "T2 Days Since Last Match",
+    "season_stage":          "Season Stage (0=Group, 1=Playoff)",
+    # ── NEW Group 1 Change 2: squad features ──────────────────────────────────
+    "team1_squad_bat_sr":    "T1 Squad Batting SR",
+    "team2_squad_bat_sr":    "T2 Squad Batting SR",
+    "team1_squad_bowl_econ": "T1 Squad Bowling Economy",
+    "team2_squad_bowl_econ": "T2 Squad Bowling Economy",
+    "team1_squad_allrounder":"T1 All-rounder Depth",
+    "team2_squad_allrounder":"T2 All-rounder Depth",
+    # ── NEW difference features ───────────────────────────────────────────────
+    "diff_chase_win_rate":   "Chase Win Rate Advantage (T1−T2)",
+    "diff_squad_bat_sr":     "Squad Batting SR Advantage (T1−T2)",
+}
+
+
+def _render_shap_explanation(X_input, team1, team2, prob_t1):
+    """
+    Renders the full SHAP Explainability section inside the Match Predictor tab.
+
+    Shows:
+      1. Waterfall chart — top factors pushing prediction up/down for THIS match
+      2. Natural language summary — top 3 reasons in plain English
+      3. Feature value table — what each key stat actually was
+
+    Args:
+        X_input  : pd.DataFrame, shape (1, n_features) — the feature vector
+        team1    : str — team 1 name (for labels)
+        team2    : str — team 2 name (for labels)
+        prob_t1  : float — predicted win probability for team1
+    """
+    st.markdown(
+        '<div class="section-header">🧠 Why This Prediction? (SHAP Explanation)</div>',
+        unsafe_allow_html=True
+    )
+
+    if not SHAP_OK:
+        st.warning("SHAP library not installed. Run: `pip install shap`")
+        return
+
+    if shap_explainer is None:
+        st.warning("SHAP explainer not available — model may need reloading.")
+        return
+
+    try:
+        # ── Compute SHAP values ────────────────────────────────────────────────
+        shap_vals = shap_explainer.shap_values(X_input)   # shape: (1, n_features)
+        # expected_value can be a scalar or 1-element array depending on SHAP version
+        _ev      = shap_explainer.expected_value
+        base_val = float(_ev[0]) if hasattr(_ev, '__len__') else float(_ev)
+        sv        = shap_vals[0]                          # 1D array of contributions
+
+        feat_names  = list(X_input.columns)
+        feat_values = X_input.iloc[0].to_dict()
+
+        # Sort by absolute SHAP value (most impactful first)
+        abs_sv      = np.abs(sv)
+        sorted_idx  = np.argsort(abs_sv)[::-1]
+        top_n       = min(12, len(feat_names))            # show top 12 features
+
+        top_features = [feat_names[i]  for i in sorted_idx[:top_n]]
+        top_shap     = [sv[i]          for i in sorted_idx[:top_n]]
+        top_labels   = [FEATURE_LABELS.get(f, f) for f in top_features]
+        top_values   = [feat_values.get(f, 0)   for f in top_features]
+
+        # ── Layout: chart left, text right ────────────────────────────────────
+        chart_col, text_col = st.columns([3, 2])
+
+        with chart_col:
+            st.markdown(f"**Waterfall: What drove the {team1} prediction?**")
+            st.caption(
+                f"Each bar shows how much a feature pushed the prediction "
+                f"**toward {team1}** (🟢 green) or **toward {team2}** (🔴 red). "
+                f"Baseline = {base_val:.1%} (average match probability)."
+            )
+
+            # Reverse order so biggest bar is at top
+            plot_labels  = top_labels[::-1]
+            plot_shap    = top_shap[::-1]
+            plot_features = top_features[::-1]
+
+            colors = ["#4caf50" if v > 0 else "#ef5350" for v in plot_shap]
+
+            fig, ax = plt.subplots(figsize=(7, max(4, top_n * 0.42)))
+            fig.patch.set_facecolor("#1e2130")
+            ax.set_facecolor("#1e2130")
+
+            bars = ax.barh(plot_labels, plot_shap, color=colors, height=0.65, edgecolor="none")
+
+            # Value annotations on bars
+            for bar, val in zip(bars, plot_shap):
+                x_pos  = val + (0.003 if val >= 0 else -0.003)
+                ha     = "left" if val >= 0 else "right"
+                ax.text(
+                    x_pos, bar.get_y() + bar.get_height() / 2,
+                    f"{val:+.3f}", va="center", ha=ha,
+                    color="white", fontsize=7.5, fontweight="bold"
+                )
+
+            # Baseline vertical line
+            ax.axvline(0, color="#888", linewidth=1.0, linestyle="--")
+
+            ax.set_xlabel("SHAP Value  (contribution to win probability)", color="#aaa", fontsize=9)
+            ax.tick_params(axis="y", colors="white", labelsize=8)
+            ax.tick_params(axis="x", colors="#aaa",  labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#333")
+
+            plt.tight_layout(pad=0.8)
+            st.pyplot(fig, use_container_width=True)
+            plt.close()
+
+        with text_col:
+            # ── Natural language summary ───────────────────────────────────────
+            st.markdown("**📝 Top Reasons**")
+
+            winning_team   = team1 if prob_t1 >= 0.5 else team2
+            base_pct       = f"{base_val:.0%}"
+
+            # Build human readable sentences for top 5 features
+            reasons = []
+            for feat, sv_val, label, fval in zip(
+                top_features[:5], top_shap[:5], top_labels[:5], top_values[:5]
+            ):
+                direction = "helps" if sv_val > 0 else "hurts"
+                impact    = abs(sv_val)
+
+                # Format feature value nicely
+                if "pct" in feat or "rate" in feat or "form" in feat:
+                    fval_str = f"{fval:.1%}" if fval <= 1.0 else f"{fval:.1f}"
+                elif "runs" in feat or "avg_runs" in feat:
+                    fval_str = f"{fval:.0f} runs"
+                elif "economy" in feat:
+                    fval_str = f"{fval:.2f} rpo"
+                elif "sr" in feat.lower():
+                    fval_str = f"{fval:.1f} SR"
+                elif "toss" in feat:
+                    fval_str = "Yes" if fval == 1 else "No"
+                else:
+                    fval_str = f"{fval:.3f}"
+
+                impact_word = (
+                    "**strongly**" if impact > 0.15 else
+                    "**moderately**" if impact > 0.07 else
+                    "slightly"
+                )
+
+                if sv_val > 0:
+                    emoji = "🟢"
+                    sentence = (
+                        f"{emoji} **{label}** = {fval_str} — "
+                        f"{impact_word} favours **{team1}**"
+                    )
+                else:
+                    emoji = "🔴"
+                    sentence = (
+                        f"{emoji} **{label}** = {fval_str} — "
+                        f"{impact_word} favours **{team2}**"
+                    )
+                reasons.append(sentence)
+
+            for r in reasons:
+                st.markdown(r)
+
+            st.markdown("---")
+
+            # ── Probability decomposition ──────────────────────────────────────
+            st.markdown("**📊 Prediction Breakdown**")
+            positive_push = sum(v for v in sv if v > 0)
+            negative_push = sum(v for v in sv if v < 0)
+
+            st.markdown(
+                f"- Base rate: **{base_val:.1%}** (avg IPL match)\n"
+                f"- {team1} factors: **{positive_push:+.1%}**\n"
+                f"- {team2} factors: **{negative_push:+.1%}**\n"
+                f"- **Final: {prob_t1:.1%}** for {team1}"
+            )
+
+            st.markdown("---")
+
+            # ── Key feature values table ───────────────────────────────────────
+            st.markdown("**📋 Key Inputs Used**")
+            key_feats = [
+                ("diff_avg_runs",        "Avg Runs Edge"),
+                ("diff_death_economy",   "Death Economy Edge"),
+                ("diff_recent_form",     "Recent Form Edge"),
+                ("diff_venue_win_rate",  "Venue Edge"),
+                ("h2h_win_rate",         "H2H Win Rate"),
+                ("toss_team1_field",     "T1 Won Toss & Fields"),
+                ("diff_chase_win_rate",  "Chase Ability Edge"),   # NEW
+                ("diff_squad_bat_sr",    "Squad Batting SR Edge"), # NEW
+                ("team1_win_streak",     "T1 Win Streak"),         # NEW
+                ("team2_win_streak",     "T2 Win Streak"),         # NEW
+            ]
+            kv_rows = []
+            for feat, label in key_feats:
+                if feat in feat_values:
+                    val = feat_values[feat]
+                    if "toss" in feat:
+                        fstr = "✅ Yes" if val == 1 else "❌ No"
+                    elif abs(val) <= 1.5 and "diff" in feat and "runs" not in feat:
+                        fstr = f"{val:+.3f}"
+                    elif "runs" in feat:
+                        fstr = f"{val:+.0f}"
+                    else:
+                        fstr = f"{val:.3f}"
+                    kv_rows.append({"Feature": label, "Value": fstr})
+
+            if kv_rows:
+                st.dataframe(
+                    pd.DataFrame(kv_rows).set_index("Feature"),
+                    use_container_width=True,
+                )
+
+    except Exception as e:
+        st.error(f"SHAP computation failed: {e}")
+        st.info("This can happen if the model version doesn't match the feature set. Re-run `python 3_train_model.py`.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
@@ -916,10 +1294,14 @@ with st.sidebar:
         st.error("⚠️ Model not found.\nRun `python 3_train_model.py` first.")
     else:
         st.success("✅ Model loaded")
+        if shap_explainer is not None:
+            st.success("✅ SHAP explainer ready")
+        else:
+            st.warning("⚠️ SHAP unavailable — run `pip install shap`")
 
     st.markdown("---")
     st.markdown(
-        "<small style='color:#666'>PitchMind v1.0 | XGBoost + RF Ensemble</small>",
+        "<small style='color:#666'>PitchMind v2.0 | XGBoost + RF + SHAP Ensemble</small>",
         unsafe_allow_html=True
     )
 
@@ -1003,16 +1385,29 @@ elif page == "🎯 Match Predictor":
     st.markdown("---")
 
 
+    # ── SHAP EXPLAINABILITY ───────────────────────────────────────────────────────
+    # Only shown when model + feature_cols are loaded (X_input exists)
+    if feature_cols is not None:
+        _render_shap_explanation(X_input, team1, team2, prob_t1)
+        st.markdown("---")
+
+
     # ── TEAM COMPARISON ───────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">📊 Team Comparison</div>', unsafe_allow_html=True)
 
     comp = {
         "Metric": [
+            # Original metrics
             "Overall Win Rate", "Recent Form (last 5)", "Avg Runs Scored",
             "Powerplay Runs", "Middle Overs Runs", "Death Overs Runs",
             "Boundary %", "Dot Ball %", "Run Rate",
             "Bowling Economy", "Death Economy", "PP Wickets Taken",
-            "Venue Win Rate"
+            "Venue Win Rate",
+            # NEW Group 1 Change 6: contextual features
+            "Chase Win Rate", "Home Win Rate",
+            "Win Streak (matches)", "Days Rest",
+            # NEW Group 1 Change 2: squad features
+            "Squad Batting SR", "Squad Bowl Economy", "All-rounders in XI",
         ],
         team1: [
             f"{s1['win_rate']:.1%}",
@@ -1028,6 +1423,14 @@ elif page == "🎯 Match Predictor":
             f"{s1['death_economy']:.1f}",
             f"{s1['pp_wickets']:.1f}",
             f"{s1['venue_win_rate']:.1%}",
+            # new
+            f"{s1['chase_win_rate']:.1%}",
+            f"{s1['home_win_rate']:.1%}",
+            f"{s1['win_streak']:.0f}",
+            f"{s1['days_rest']:.0f}",
+            f"{s1['squad_bat_sr']:.1f}",
+            f"{s1['squad_bowl_econ']:.2f}",
+            f"{s1['squad_allrounder']:.0f}",
         ],
         team2: [
             f"{s2['win_rate']:.1%}",
@@ -1043,6 +1446,14 @@ elif page == "🎯 Match Predictor":
             f"{s2['death_economy']:.1f}",
             f"{s2['pp_wickets']:.1f}",
             f"{s2['venue_win_rate']:.1%}",
+            # new
+            f"{s2['chase_win_rate']:.1%}",
+            f"{s2['home_win_rate']:.1%}",
+            f"{s2['win_streak']:.0f}",
+            f"{s2['days_rest']:.0f}",
+            f"{s2['squad_bat_sr']:.1f}",
+            f"{s2['squad_bowl_econ']:.2f}",
+            f"{s2['squad_allrounder']:.0f}",
         ],
     }
     comp_df = pd.DataFrame(comp).set_index("Metric")
@@ -1078,6 +1489,36 @@ elif page == "🎯 Match Predictor":
         else:
             st.info("**📈 Win Rate**\n\n✅ " + team2 + " has better overall win rate")
 
+    # NEW: second row — Group 1 contextual factors
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        cwr_diff = s1["chase_win_rate"] - s2["chase_win_rate"]
+        if abs(cwr_diff) < 0.05:
+            st.info("**🏃 Chase Ability**\n\nBoth teams similar at chasing")
+        elif cwr_diff > 0:
+            st.info("**🏃 Chase Ability**\n\n✅ " + team1 + f" better at chasing ({s1['chase_win_rate']:.0%})")
+        else:
+            st.info("**🏃 Chase Ability**\n\n✅ " + team2 + f" better at chasing ({s2['chase_win_rate']:.0%})")
+
+    with col5:
+        streak1 = int(s1["win_streak"])
+        streak2 = int(s2["win_streak"])
+        if streak1 > streak2:
+            st.info(f"**🔥 Momentum**\n\n✅ {team1} on {streak1}-match win streak")
+        elif streak2 > streak1:
+            st.info(f"**🔥 Momentum**\n\n✅ {team2} on {streak2}-match win streak")
+        else:
+            st.info(f"**🔥 Momentum**\n\nBoth teams equal momentum (streak: {streak1})")
+
+    with col6:
+        hwr_diff = s1["home_win_rate"] - s2["home_win_rate"]
+        if abs(hwr_diff) < 0.05:
+            st.info("**🏠 Home Advantage**\n\nSimilar home records")
+        elif hwr_diff > 0:
+            st.info("**🏠 Home Advantage**\n\n✅ " + team1 + f" stronger at home ({s1['home_win_rate']:.0%})")
+        else:
+            st.info("**🏠 Home Advantage**\n\n✅ " + team2 + f" stronger at home ({s2['home_win_rate']:.0%})")
+
     st.markdown("---")
 
 
@@ -1093,6 +1534,86 @@ elif page == "🎯 Match Predictor":
         st.metric(team2 + " Venue Win Rate", f"{s2['venue_win_rate']:.0%}")
 
     st.markdown("---")
+
+
+    # ── PLAYER XI SQUAD STATS ─────────────────────────────────────────────────────
+    # NEW (Group 4): reads Playing XIs from live data and shows per-player stats
+    # inline in the Match Predictor so you can see squad strength next to prediction.
+    _live_xi = load_live_match() or {}
+    _xi1 = _live_xi.get("team1_xi", [])
+    _xi2 = _live_xi.get("team2_xi", [])
+
+    if (_xi1 or _xi2) and bat_df is not None and bowl_df is not None:
+        st.markdown(
+            '<div class="section-header">🏏 Playing XI Squad Stats</div>',
+            unsafe_allow_html=True
+        )
+        st.caption(
+            "Player stats auto-loaded from Live Data tab. "
+            "Go to **Live Match → Manual Entry** to add/change Playing XIs."
+        )
+
+        _bat_lkp  = bat_df.set_index("player").to_dict("index")  if len(bat_df)  > 0 else {}
+        _bowl_lkp = bowl_df.set_index("player").to_dict("index") if len(bowl_df) > 0 else {}
+
+        # ── Squad strength summary ─────────────────────────────────────────────
+        def _squad_batting_strength(xi):
+            """Return avg SR and avg batting_avg for players found in data."""
+            srs, avgs = [], []
+            for p in xi:
+                s = _bat_lkp.get(p, {})
+                if s.get("strike_rate"):   srs.append(s["strike_rate"])
+                if s.get("batting_avg"):   avgs.append(s["batting_avg"])
+            return (np.mean(srs) if srs else None), (np.mean(avgs) if avgs else None)
+
+        def _squad_bowling_strength(xi):
+            """Return avg economy and total wickets for players found in data."""
+            econs, wkts = [], []
+            for p in xi:
+                s = _bowl_lkp.get(p, {})
+                if s.get("economy"):  econs.append(s["economy"])
+                if s.get("wickets"): wkts.append(s["wickets"])
+            return (np.mean(econs) if econs else None), (sum(wkts) if wkts else None)
+
+        xi_c1, xi_c2 = st.columns(2)
+
+        with xi_c1:
+            st.markdown(f"**🔵 {team1}** — {len(_xi1)} players")
+            bat_sr1, bat_avg1 = _squad_batting_strength(_xi1)
+            econ1,   wkts1    = _squad_bowling_strength(_xi1)
+
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("Avg SR",   f"{bat_sr1:.0f}"  if bat_sr1  else "—")
+            sm2.metric("Avg Bat",  f"{bat_avg1:.1f}" if bat_avg1 else "—")
+            sm3.metric("Avg Eco",  f"{econ1:.2f}"    if econ1    else "—")
+            sm4.metric("Total Wkts", str(int(wkts1)) if wkts1    else "—")
+
+            for p in _xi1:
+                _player_batting_card(p, _bat_lkp.get(p, {}))
+
+        with xi_c2:
+            st.markdown(f"**🔴 {team2}** — {len(_xi2)} players")
+            bat_sr2, bat_avg2 = _squad_batting_strength(_xi2)
+            econ2,   wkts2    = _squad_bowling_strength(_xi2)
+
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("Avg SR",   f"{bat_sr2:.0f}"  if bat_sr2  else "—")
+            sm2.metric("Avg Bat",  f"{bat_avg2:.1f}" if bat_avg2 else "—")
+            sm3.metric("Avg Eco",  f"{econ2:.2f}"    if econ2    else "—")
+            sm4.metric("Total Wkts", str(int(wkts2)) if wkts2    else "—")
+
+            for p in _xi2:
+                _player_batting_card(p, _bat_lkp.get(p, {}))
+
+        st.markdown("---")
+
+    elif bat_df is None:
+        # Soft prompt — don't break the page if player data not loaded
+        st.info(
+            "💡 **Tip:** Run `python 1_data_cleaning.py` then `python 6_player_features.py` "
+            "to enable Player XI squad stats here."
+        )
+        st.markdown("---")
 
 
     # ── BAR CHART: BATTING vs BOWLING ─────────────────────────────────────────────
@@ -1149,25 +1670,28 @@ elif page == "🎯 Match Predictor":
 
     # ── ABOUT MODEL ───────────────────────────────────────────────────────────────
     with st.expander("ℹ️ About This Model"):
-        st.markdown("""
+        st.markdown(f"""
         **Model:** XGBoost + Random Forest Ensemble (averaged probabilities)
 
-        **45 Features used:**
-        - Team win rates, recent form (last 5), head-to-head record, NRR
-        - Avg runs, powerplay runs, **middle overs runs**, death overs runs
-        - Run rate, top-3 batsman strike rate, boundary %, **dot ball %**
-        - Bowling economy, death economy, PP wickets taken
-        - Venue win rates, venue average runs
-        - Toss win, toss decision, toss + field combination
-        - **10 difference features** (team1 vs team2 relative advantage)
+        **64 Features used** (all from `master_features.csv` generated by `2_feature_engineering.py v4`):
+
+        *Original (47):* Team win rates, recent form, H2H, NRR, avg/PP/middle/death runs,
+        run rate, top-3 SR, boundary %, dot ball %, bowling economy, death economy,
+        PP wickets, bowling SR, venue win rates, venue avg, toss features, 10 diff features.
+
+        *Group 1 — Change 6 (9 new):* Chase win rate × 2, home win rate × 2,
+        win streak × 2, days rest × 2, season stage.
+
+        *Group 1 — Change 2 (8 new):* Squad batting SR × 2, squad bowling economy × 2,
+        all-rounder count × 2, diff_chase_win_rate, diff_squad_bat_sr.
 
         **Dataset:** IPL 2008–2025 | ~1,169 matches
 
-        **Training:** Time-aware split — trained on older seasons, tested on 2024–2025
+        **Training:** TimeSeriesSplit 5-fold CV + Optuna 30-trial tuning + season weighting
 
-        **Limitations:**
-        - Does not account for player injuries or playing XI composition
-        - Cannot predict rain interruptions or pitch deterioration mid-game
+        **Explainability:** SHAP TreeExplainer — green = favours Team 1, red = favours Team 2.
+        """) if shap_explainer else st.markdown("""
+        **Model:** XGBoost + Random Forest Ensemble | **Dataset:** IPL 2008–2025 | ~1,169 matches
         """)
 
 
