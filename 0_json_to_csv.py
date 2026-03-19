@@ -78,9 +78,8 @@ def parse_match(filepath):
     # ── date & season ─────────────────────────────────────────────────────────
     dates = info.get("dates", [])
     date  = dates[0] if dates else "1900-01-01"
-    season_raw = info.get("season", str(date[:4]))
-    # Normalize "2007/08" → "2008", "2024/25" → "2024"
-    season = str(season_raw).replace("/", "-").split("/")[0].split("-")[0]
+    # FIX: Always derive season from date (ignores old season column)
+    season = date[:4]  # Extract year from YYYY-MM-DD format
 
     # ── teams ─────────────────────────────────────────────────────────────────
     teams = info.get("teams", [])

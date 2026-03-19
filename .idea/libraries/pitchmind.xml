@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="pitchmind">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/ipl_json.zip!/" />
+      <root url="jar://$PROJECT_DIR$/t20s_json.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
