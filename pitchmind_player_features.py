@@ -304,6 +304,29 @@ def get_player_stats(player_name, del_df=None, matches_df=None):
     }
 
 
+# ── GET ALL PLAYER STATS (used by dashboard) ─────────────────────────────────
+def get_all_player_stats(del_df=None, matches_df=None):
+    """
+    Compute and return both batting and bowling DataFrames.
+    Used by dashboard's Player Scout tab.
+
+    Returns:
+        tuple: (bat_df, bowl_df) DataFrames
+    """
+    if del_df is None:
+        del_df = load_deliveries()
+    if del_df is None:
+        return None, None
+
+    if matches_df is None:
+        matches_df = load_matches()
+
+    bat_df = compute_batting_stats(del_df, matches_df)
+    bowl_df = compute_bowling_stats(del_df)
+
+    return bat_df, bowl_df
+
+
 # ── SEARCH PLAYERS BY PARTIAL NAME ────────────────────────────────────────────
 def search_players(query, del_df=None):
     """Return list of player names matching query (case-insensitive)."""

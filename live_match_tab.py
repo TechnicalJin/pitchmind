@@ -349,11 +349,11 @@ def fetch_live_innings(match_id):
 # ══════════════════════════════════════════════════════════════════════════════
 # RENDER — MAIN TAB FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
-def render_live_match_tab():
+def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, all_venues=None):
     """
     Call this inside your Streamlit tab:
         with tab_live:
-            render_live_match_tab()
+            render_live_match_tab(team1, team2, venue, all_teams, all_venues)
     """
     st.markdown("## 🔴 Live In-Match Run Predictor")
     st.caption("Track live score → predict phase totals & final score using ML + batsman SR + bowler economy")
@@ -378,9 +378,33 @@ def render_live_match_tab():
     with col_input:
         st.markdown("### ⚙️ Match Setup")
 
-        batting_team  = st.text_input("Batting Team",  value="India",       key="lt_bat_team")
-        bowling_team  = st.text_input("Bowling Team",  value="Australia",   key="lt_bowl_team")
-        venue         = st.text_input("Venue",         value="Wankhede Stadium", key="lt_venue")
+        # Use selectbox with IPL teams if available, else default list
+        if all_teams is None:
+            all_teams = [
+                "Chennai Super Kings", "Mumbai Indians",
+                "Royal Challengers Bengaluru", "Kolkata Knight Riders",
+                "Delhi Capitals", "Punjab Kings", "Rajasthan Royals",
+                "Sunrisers Hyderabad", "Lucknow Super Giants", "Gujarat Titans",
+            ]
+        if all_venues is None:
+            all_venues = [
+                "Wankhede Stadium", "M Chinnaswamy Stadium",
+                "Eden Gardens", "MA Chidambaram Stadium, Chepauk",
+                "Arun Jaitley Stadium", "Rajiv Gandhi International Stadium",
+            ]
+
+        # Default to passed team1/team2 if provided
+        default_bat_idx = all_teams.index(team1) if team1 and team1 in all_teams else 0
+        default_venue_idx = all_venues.index(venue) if venue and venue in all_venues else 0
+
+        batting_team = st.selectbox("🏏 Batting Team", all_teams, index=default_bat_idx, key="lt_bat_team")
+
+        # Filter out batting team from bowling options
+        bowl_options = [t for t in all_teams if t != batting_team]
+        default_bowl_idx = bowl_options.index(team2) if team2 and team2 in bowl_options else 0
+        bowling_team = st.selectbox("🎯 Bowling Team", bowl_options, index=default_bowl_idx, key="lt_bowl_team")
+
+        venue = st.selectbox("🏟️ Venue", all_venues, index=default_venue_idx, key="lt_venue")
 
         st.markdown("---")
         st.markdown("### 🔄 Data Source")

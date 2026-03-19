@@ -24,26 +24,13 @@ import os
 import json
 import pandas as pd
 from pathlib import Path
+from utils import normalize_team
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 JSON_FOLDER  = os.path.join("data", "Data_Cricsheet")
 OUTPUT_DIR   = "data"
 MATCHES_OUT  = os.path.join(OUTPUT_DIR, "matches.csv")
 DELIVERY_OUT = os.path.join(OUTPUT_DIR, "deliveries.csv")
-
-# Team name normalization (Cricsheet uses various spellings)
-TEAM_MAP = {
-    "Delhi Daredevils"              : "Delhi Capitals",
-    "Deccan Chargers"               : "Sunrisers Hyderabad",
-    "Kings XI Punjab"               : "Punjab Kings",
-    "Rising Pune Supergiants"       : "Rising Pune Supergiant",
-    "Royal Challengers Bangalore"   : "Royal Challengers Bengaluru",
-    "Pune Warriors"                 : "Pune Warriors",            # defunct — keep as-is
-    "Kochi Tuskers Kerala"          : "Kochi Tuskers Kerala",     # defunct — keep as-is
-}
-
-def normalize_team(name):
-    return TEAM_MAP.get(name, name)
 
 
 # ── PARSE ONE JSON FILE ───────────────────────────────────────────────────────

@@ -10,18 +10,12 @@ Run:
 import pandas as pd
 import numpy as np
 import os
+from utils import normalize_team, apply_team_normalization
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DATA_DIR = "data"
 MATCHES_FILE = os.path.join(DATA_DIR, "matches.csv")
 DELIVERIES_FILE = os.path.join(DATA_DIR, "deliveries.csv")
-
-# Team name replacements (old → current)
-TEAM_NAME_MAP = {
-    "Delhi Daredevils": "Delhi Capitals",
-    "Kings XI Punjab": "Punjab Kings",
-    "Rising Pune Supergiants": "Rising Pune Supergiant",
-}
 
 
 # ── MATCHES CLEANING ──────────────────────────────────────────────────────────
@@ -38,9 +32,8 @@ def clean_matches(filepath):
     matches["city"] = matches["city"].fillna("Unknown")
     matches["player_of_match"] = matches["player_of_match"].fillna("Unknown")
 
-    # Standardize team names
-    for col in ["team1", "team2", "toss_winner", "winner"]:
-        matches[col] = matches[col].replace(TEAM_NAME_MAP)
+    # Standardize team names using centralized normalization
+    apply_team_normalization(matches, ["team1", "team2", "toss_winner", "winner"])
 
     print(f"Matches clean shape: {matches.shape}")
     print("Matches dataset cleaned")

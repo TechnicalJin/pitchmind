@@ -44,20 +44,19 @@ import pandas as pd
 import numpy as np
 import os
 import warnings
+from utils import (
+    normalize_team,
+    apply_team_normalization,
+    validate_toss_distribution,
+    validate_team_name_consistency
+)
 warnings.filterwarnings("ignore")
 
 DATA_DIR = "data"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TEAM & VENUE STANDARDIZATION
+# VENUE STANDARDIZATION
 # ══════════════════════════════════════════════════════════════════════════════
-TEAM_MAP = {
-    "Delhi Daredevils"            : "Delhi Capitals",
-    "Deccan Chargers"             : "Sunrisers Hyderabad",
-    "Kings XI Punjab"             : "Punjab Kings",
-    "Rising Pune Supergiants"     : "Rising Pune Supergiant",
-    "Royal Challengers Bangalore" : "Royal Challengers Bengaluru",
-}
 
 VENUE_MAP = {
     "Feroz Shah Kotla"                          : "Arun Jaitley Stadium",
@@ -180,10 +179,12 @@ def load_data():
     print(f"  matches.csv    : {matches.shape}")
     print(f"  deliveries.csv : {deliveries.shape}")
 
-    for col in ["team1", "team2", "toss_winner", "winner"]:
-        matches[col] = matches[col].replace(TEAM_MAP)
-    for col in ["batting_team", "bowling_team"]:
-        deliveries[col] = deliveries[col].replace(TEAM_MAP)
+    # Apply centralized team name normalization
+    apply_team_normalization(matches, ["team1", "team2", "toss_winner", "winner"])
+    apply_team_normalization(deliveries, ["batting_team", "bowling_team"])
+
+    # Validate team name consistency
+    validate_team_name_consistency(matches, ["team1", "team2", "toss_winner", "winner"])
 
     matches["venue"]      = matches["venue"].replace(VENUE_MAP)
     matches["season_int"] = matches["season"].astype(str).str[:4].astype(int)
@@ -955,6 +956,14 @@ def validate_and_print(master_df):
     print(f"    team1_avg_runs mean = {master_df['team1_avg_runs'].mean():.2f}")
     print(f"    team2_avg_runs mean = {master_df['team2_avg_runs'].mean():.2f}")
     print(f"    Gap = {gap:.2f} runs {'✅ (PASS < 1)' if gap < 1 else '❌ (FAIL > 1)'}")
+
+    # Toss winner bias check: toss_win should be ~0.50
+    print(f"\n  Toss winner bias check:")
+    toss_mean = master_df['toss_win'].mean()
+    print(f"    toss_win (team1_toss_win) mean = {toss_mean:.4f}")
+    toss_pass = validate_toss_distribution(master_df.rename(columns={"toss_win": "team1_toss_win"}))
+    if not toss_pass:
+        print("    ⚠️  WARNING: Toss distribution is biased - check team name normalization")
 
     # New feature sanity checks
     print(f"\n  New feature means (sanity):")
