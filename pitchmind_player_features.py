@@ -18,6 +18,16 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 
+# Import name resolution system
+try:
+    from name_resolver import resolve_name, get_fallback_stats, load_name_map
+    NAME_RESOLVER_AVAILABLE = True
+except ImportError:
+    NAME_RESOLVER_AVAILABLE = False
+    resolve_name = lambda x: x  # fallback: return name unchanged
+    get_fallback_stats = lambda *args, **kwargs: {"batting": {}, "bowling": {}}
+    load_name_map = lambda: {}
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DATA_DIR          = "data"
 DELIVERIES_CLEAN  = os.path.join(DATA_DIR, "deliveries_clean.csv")
@@ -245,7 +255,7 @@ def compute_h2h(del_df):
 
 
 # ── SQUAD STATS ENTRY POINT ───────────────────────────────────────────────────
-def get_squad_stats(team1_xi, team2_xi, del_df=None, matches_df=None):
+def get_squad_stats(team1_xi, team2_xi, del_df=None, matches_df=None, use_name_resolution=True):
     """
     Given two lists of player names, return:
         {
@@ -253,6 +263,9 @@ def get_squad_stats(team1_xi, team2_xi, del_df=None, matches_df=None):
           "team2": { ... },
           "h2h":   { (batter, bowler): {...} }
         }
+
+    With name resolution enabled (default), squad names like "Jasprit Bumrah"
+    will be resolved to cricsheet names like "JJ Bumrah" for stats lookup.
     """
     if del_df is None:
         del_df = load_deliveries()
@@ -272,18 +285,37 @@ def get_squad_stats(team1_xi, team2_xi, del_df=None, matches_df=None):
 
     for squad_key, xi in [("team1", team1_xi), ("team2", team2_xi)]:
         for player in xi:
+            # Resolve player name to cricsheet format if enabled
+            if use_name_resolution and NAME_RESOLVER_AVAILABLE:
+                resolved_name = resolve_name(player)
+            else:
+                resolved_name = player
+
+            if resolved_name:
+                batting_stats = bat_lookup.get(resolved_name, {})
+                bowling_stats = bowl_lookup.get(resolved_name, {})
+            else:
+                # New player - no history, use fallback
+                fallback = get_fallback_stats("", "", bat_df, bowl_df)
+                batting_stats = fallback.get("batting", {})
+                bowling_stats = fallback.get("bowling", {})
+
             result[squad_key][player] = {
-                "batting" : bat_lookup.get(player, {}),
-                "bowling" : bowl_lookup.get(player, {}),
+                "batting" : batting_stats,
+                "bowling" : bowling_stats,
+                "resolved_name": resolved_name,  # Include resolved name for debugging
             }
 
     return result
 
 
 # ── SINGLE PLAYER LOOKUP ──────────────────────────────────────────────────────
-def get_player_stats(player_name, del_df=None, matches_df=None):
+def get_player_stats(player_name, del_df=None, matches_df=None, use_name_resolution=True):
     """
     Returns dict with batting and bowling stats for a single player.
+
+    With name resolution enabled (default), full names like "Virat Kohli"
+    will be resolved to cricsheet names like "V Kohli".
     """
     if del_df is None:
         del_df = load_deliveries()
@@ -292,15 +324,27 @@ def get_player_stats(player_name, del_df=None, matches_df=None):
     if del_df is None:
         return {}
 
+    # Resolve name if enabled
+    if use_name_resolution and NAME_RESOLVER_AVAILABLE:
+        resolved_name = resolve_name(player_name)
+        if not resolved_name:
+            # New player - return fallback stats
+            bat_df = compute_batting_stats(del_df, matches_df)
+            bowl_df = compute_bowling_stats(del_df)
+            return get_fallback_stats("", "", bat_df, bowl_df)
+    else:
+        resolved_name = player_name
+
     bat_df  = compute_batting_stats(del_df, matches_df)
     bowl_df = compute_bowling_stats(del_df)
 
-    bat = bat_df[bat_df["player"] == player_name].to_dict("records")
-    bow = bowl_df[bowl_df["player"] == player_name].to_dict("records")
+    bat = bat_df[bat_df["player"] == resolved_name].to_dict("records")
+    bow = bowl_df[bowl_df["player"] == resolved_name].to_dict("records")
 
     return {
         "batting" : bat[0] if bat else {},
         "bowling" : bow[0] if bow else {},
+        "resolved_name": resolved_name,
     }
 
 

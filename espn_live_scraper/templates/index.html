@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏏 CricTrack — Live IPL 2026</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+    <div class="bg-grid"></div>
+
+    <header>
+        <div class="logo">🏏 CRICTRACK</div>
+        <div class="subtitle">LIVE IPL 2026 — POWERED BY CRICAPI</div>
+        <div id="api-quota" class="quota-badge">API QUOTA: — / 100</div>
+    </header>
+
+    <main>
+
+        <!-- Tab Nav -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="showTab('live', this)">⚡ LIVE MATCHES</button>
+            <button class="tab-btn" onclick="showTab('score', this)">🎯 MATCH SCORE</button>
+            <button class="tab-btn" onclick="showTab('schedule', this)">📅 IPL SCHEDULE</button>
+        </div>
+
+        <!-- LIVE MATCHES TAB -->
+        <div id="tab-live" class="tab-content active">
+            <div class="section-header">
+                <h2>⚡ LIVE RIGHT NOW</h2>
+                <button class="btn-primary" onclick="fetchLive()">REFRESH LIVE</button>
+            </div>
+            <div id="live-output" class="cards-grid">
+                <div class="placeholder-msg">Click "REFRESH LIVE" to fetch currently live matches</div>
+            </div>
+        </div>
+
+        <!-- MATCH SCORE TAB -->
+        <div id="tab-score" class="tab-content">
+            <div class="section-header">
+                <h2>🎯 FETCH MATCH SCORE</h2>
+            </div>
+            <div class="input-row">
+                <input type="text" id="match-id-input" placeholder="Paste Match ID here (e.g. 55fe0f15-6eb0...)">
+                <button class="btn-primary" onclick="fetchScore()">GET SCORE</button>
+            </div>
+            <div class="hint">💡 Tip: Copy a Match ID from the IPL Schedule tab, or click "GET FULL SCORE →" on a live card</div>
+            <div id="score-output" class="score-display"></div>
+        </div>
+
+        <!-- SCHEDULE TAB -->
+        <div id="tab-schedule" class="tab-content">
+            <div class="section-header">
+                <h2>📅 IPL 2026 FULL SCHEDULE</h2>
+                <button class="btn-primary" onclick="fetchSchedule()">LOAD SCHEDULE</button>
+            </div>
+            <div id="schedule-filter" class="filter-row" style="display:none;">
+                <input type="text" id="team-filter" placeholder="Filter by team name..." oninput="filterSchedule()">
+            </div>
+            <div id="schedule-output" class="schedule-list">
+                <div class="placeholder-msg">Click "LOAD SCHEDULE" to fetch IPL 2026 schedule</div>
+            </div>
+        </div>
+
+    </main>
+
+    <footer>
+        <span>Data via <strong>CricAPI</strong> — Free plan: 100 req/day &nbsp;|&nbsp;
+        ESPN scraping blocked (403) → Replaced with CricAPI ✅</span>
+    </footer>
+
+    <script>
+        let allScheduleMatches = [];
+
+        // ── TAB SWITCHING ─────────────────────────────────────────────────────
+        function showTab(name, btn) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tab-' + name).classList.add('active');
+            if (btn) btn.classList.add('active');
+        }
+
+        // ── API QUOTA BADGE ───────────────────────────────────────────────────
+        function updateQuota(hitsToday, hitsLimit) {
+            const el  = document.getElementById('api-quota');
+            const pct = Math.round((hitsToday / hitsLimit) * 100);
+            el.textContent = `API QUOTA: ${hitsToday} / ${hitsLimit} (${pct}%)`;
+            el.style.borderColor = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#22c55e';
+            el.style.color       = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#22c55e';
+        }
+
+        // ── LIVE MATCHES ──────────────────────────────────────────────────────
+        async function fetchLive() {
+            const out = document.getElementById('live-output');
+            out.innerHTML = '<div class="loading">⚡ FETCHING LIVE MATCHES...</div>';
+            try {
+                const res  = await fetch('/live');
+                const data = await res.json();
+                if (data.error) {
+                    out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`;
+                    return;
+                }
+                updateQuota(data.api_hits_today, data.api_hits_limit);
+                if (data.live_count === 0) {
+                    out.innerHTML = '<div class="placeholder-msg">😴 No live matches right now. Check back during match hours.</div>';
+                    return;
+                }
+                out.innerHTML = data.matches.map(m => renderMatchCard(m)).join('');
+            } catch (e) {
+                out.innerHTML = `<div class="error-box">❌ Network error: ${e.message}</div>`;
+            }
+        }
+
+        function renderMatchCard(m) {
+            const scores = (m.score || []).map(s =>
+                `<div class="innings-row">
+                    <span class="innings-name">${s.inning}</span>
+                    <span class="innings-score">${s.r}/${s.w} <small>(${s.o} ov)</small></span>
+                 </div>`
+            ).join('') || '<div class="no-score">Match in progress — no score yet</div>';
+
+            const team1 = m.teamInfo?.[0] || {};
+            const team2 = m.teamInfo?.[1] || {};
+
+            return `
+            <div class="match-card live-card">
+                <div class="live-badge">🔴 LIVE</div>
+                <div class="match-name">${m.name}</div>
+                <div class="teams-row">
+                    <div class="team">
+                        ${team1.img ? `<img src="${team1.img}" class="team-logo" onerror="this.style.display='none'">` : ''}
+                        <span>${team1.shortname || m.teams?.[0] || '?'}</span>
+                    </div>
+                    <div class="vs">VS</div>
+                    <div class="team">
+                        ${team2.img ? `<img src="${team2.img}" class="team-logo" onerror="this.style.display='none'">` : ''}
+                        <span>${team2.shortname || m.teams?.[1] || '?'}</span>
+                    </div>
+                </div>
+                <div class="score-block">${scores}</div>
+                <div class="match-meta">
+                    <span>📍 ${m.venue || 'N/A'}</span>
+                    <span>🏏 ${m.matchType?.toUpperCase() || 'T20'}</span>
+                </div>
+                <div class="status-text">${m.status || ''}</div>
+                <button class="btn-sm" onclick="loadScoreById('${m.id}')">GET FULL SCORE →</button>
+            </div>`;
+        }
+
+        // ── SCORE ─────────────────────────────────────────────────────────────
+        function loadScoreById(id) {
+            document.getElementById('match-id-input').value = id;
+            // Switch to score tab
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tab-score').classList.add('active');
+            document.querySelectorAll('.tab-btn')[1].classList.add('active');
+            fetchScore();
+        }
+
+        async function fetchScore() {
+            const matchId = document.getElementById('match-id-input').value.trim();
+            const out     = document.getElementById('score-output');
+            if (!matchId) {
+                out.innerHTML = '<div class="error-box">⚠️ Please enter a Match ID</div>';
+                return;
+            }
+            out.innerHTML = '<div class="loading">🎯 FETCHING SCORE...</div>';
+            try {
+                const formData = new URLSearchParams();
+                formData.append('match_id', matchId);
+                const res  = await fetch('/score', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.error) {
+                    out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`;
+                    return;
+                }
+                out.innerHTML = renderFullScore(data);
+            } catch (e) {
+                out.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+            }
+        }
+
+        function renderFullScore(d) {
+            const scoresHtml = (d.scores || []).map(s => `
+                <div class="innings-block">
+                    <div class="innings-title">${s.inning}</div>
+                    <div class="big-score">${s.score_str}</div>
+                </div>
+            `).join('') || '<div class="no-score">Scorecard not available yet</div>';
+
+            const toss        = d.tossWinner  ? `🪙 Toss: <strong>${d.tossWinner}</strong> won &amp; chose to <strong>${d.tossChoice}</strong>` : '';
+            const winner      = d.matchWinner ? `🏆 Winner: <strong>${d.matchWinner}</strong>` : '';
+            const statusBadge = d.matchEnded  ? '✅ COMPLETED' : d.matchStarted ? '🔴 LIVE' : '🕐 UPCOMING';
+
+            return `
+            <div class="full-score-card">
+                <div class="score-header">
+                    <div class="match-title">${d.name}</div>
+                    <div class="status-badge">${statusBadge}</div>
+                </div>
+                <div class="teams-big">
+                    ${(d.teamInfo || []).map(t => `
+                        <div class="team-big">
+                            ${t.img ? `<img src="${t.img}" class="team-logo-big" onerror="this.style.display='none'">` : ''}
+                            <span>${t.name}</span>
+                        </div>
+                    `).join('<span class="vs-big">VS</span>')}
+                </div>
+                <div class="innings-grid">${scoresHtml}</div>
+                <div class="match-details">
+                    <div>📍 ${d.venue || 'N/A'}</div>
+                    ${toss   ? `<div>${toss}</div>`   : ''}
+                    ${winner ? `<div>${winner}</div>` : ''}
+                    <div>${d.status || ''}</div>
+                </div>
+            </div>`;
+        }
+
+        // ── SCHEDULE ──────────────────────────────────────────────────────────
+        async function fetchSchedule() {
+            const out = document.getElementById('schedule-output');
+            out.innerHTML = '<div class="loading">📅 LOADING IPL 2026 SCHEDULE...</div>';
+            try {
+                const res  = await fetch('/series');
+                const data = await res.json();
+                if (data.error) {
+                    out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`;
+                    return;
+                }
+                updateQuota(data.api_hits_today, data.api_hits_limit);
+                allScheduleMatches = data.matches;
+                document.getElementById('schedule-filter').style.display = 'flex';
+                renderSchedule(data.matches);
+            } catch (e) {
+                out.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+            }
+        }
+
+        function filterSchedule() {
+            const q        = document.getElementById('team-filter').value.toLowerCase();
+            const filtered = allScheduleMatches.filter(m =>
+                m.name.toLowerCase().includes(q) ||
+                (m.teams || []).some(t => t.toLowerCase().includes(q))
+            );
+            renderSchedule(filtered);
+        }
+
+        function renderSchedule(matches) {
+            const out = document.getElementById('schedule-output');
+            if (!matches.length) {
+                out.innerHTML = '<div class="placeholder-msg">No matches found</div>';
+                return;
+            }
+            out.innerHTML = matches.map(m => {
+                const dt      = new Date(m.dateTimeGMT);
+                const dateStr = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+                const timeStr = dt.toLocaleTimeString('en-IN', {
+                    hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata'
+                }) + ' IST';
+                const team1 = m.teamInfo?.[0] || {};
+                const team2 = m.teamInfo?.[1] || {};
+
+                return `
+                <div class="schedule-row">
+                    <div class="schedule-date">
+                        <div class="date-day">${dt.getDate()}</div>
+                        <div class="date-month">${dt.toLocaleString('default', { month: 'short' }).toUpperCase()}</div>
+                        <div class="date-time">${timeStr}</div>
+                    </div>
+                    <div class="schedule-teams">
+                        <div class="sched-team">
+                            ${team1.img ? `<img src="${team1.img}" class="team-logo-sm" onerror="this.style.display='none'">` : ''}
+                            <span>${team1.shortname || m.teams?.[0] || '?'}</span>
+                        </div>
+                        <div class="sched-vs">VS</div>
+                        <div class="sched-team">
+                            ${team2.img ? `<img src="${team2.img}" class="team-logo-sm" onerror="this.style.display='none'">` : ''}
+                            <span>${team2.shortname || m.teams?.[1] || '?'}</span>
+                        </div>
+                    </div>
+                    <div class="schedule-venue">📍 ${m.venue}</div>
+                    <div class="schedule-actions">
+                        <button class="btn-sm" onclick="copyId('${m.id}')">COPY ID</button>
+                        <button class="btn-sm btn-score" onclick="loadScoreById('${m.id}')">SCORE →</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function copyId(id) {
+            navigator.clipboard.writeText(id).catch(() => {});
+            document.getElementById('match-id-input').value = id;
+            alert('Match ID copied to Score tab:\n' + id);
+        }
+    </script>
+
+</body>
+</html>

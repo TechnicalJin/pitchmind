@@ -64,6 +64,15 @@ except ImportError:
         def search_players(*a, **kw): return []
         PLAYER_MODULE_OK = False
 
+# ── NAME RESOLVER MODULE ─────────────────────────────────────────────────────
+try:
+    from name_resolver import resolve_name, get_resolution_stats
+    NAME_RESOLVER_OK = True
+except ImportError:
+    NAME_RESOLVER_OK = False
+    resolve_name = lambda x: x  # fallback: return name unchanged
+    get_resolution_stats = lambda: {}
+
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="PitchMind — IPL Predictor",
@@ -725,8 +734,25 @@ def _render_player_scout(team1_name, team2_name):
         xi2 = [p.strip() for p in xi2_raw.strip().splitlines() if p.strip()]
 
         if not xi1 and not xi2:
-            st.info("👆 Enter at least one player name above to see stats. Names must match Cricsheet data exactly (e.g. 'V Kohli', 'RG Sharma').")
+            if NAME_RESOLVER_OK:
+                st.info("👆 Enter player names above to see stats. Names can be in full format (e.g., 'Jasprit Bumrah', 'Virat Kohli') or Cricsheet format (e.g., 'JJ Bumrah', 'V Kohli').")
+            else:
+                st.info("👆 Enter at least one player name above to see stats. Names must match Cricsheet data exactly (e.g. 'V Kohli', 'RG Sharma').")
             return
+
+        # ── Helper: Resolve name and get stats ──────────────────────────────
+        def get_resolved_stats(player_name, lookup_dict):
+            """Resolve name and lookup stats, with fallback."""
+            if NAME_RESOLVER_OK:
+                resolved = resolve_name(player_name)
+                if resolved:
+                    stats = lookup_dict.get(resolved, {})
+                    return stats, resolved
+                else:
+                    # New player - no history
+                    return {}, None
+            else:
+                return lookup_dict.get(player_name, {}), player_name
 
         st.markdown("---")
 
@@ -738,7 +764,8 @@ def _render_player_scout(team1_name, team2_name):
             st.markdown(f"**{team1_name}**")
             if xi1:
                 for p in xi1:
-                    _player_batting_card(p, bat_lookup.get(p, {}))
+                    stats, resolved = get_resolved_stats(p, bat_lookup)
+                    _player_batting_card(p, stats)
             else:
                 st.caption("No players entered")
 
@@ -746,7 +773,8 @@ def _render_player_scout(team1_name, team2_name):
             st.markdown(f"**{team2_name}**")
             if xi2:
                 for p in xi2:
-                    _player_batting_card(p, bat_lookup.get(p, {}))
+                    stats, resolved = get_resolved_stats(p, bat_lookup)
+                    _player_batting_card(p, stats)
             else:
                 st.caption("No players entered")
 
@@ -759,7 +787,8 @@ def _render_player_scout(team1_name, team2_name):
             st.markdown(f"**{team1_name}**")
             if xi1:
                 for p in xi1:
-                    _player_bowling_card(p, bowl_lookup.get(p, {}))
+                    stats, resolved = get_resolved_stats(p, bowl_lookup)
+                    _player_bowling_card(p, stats)
             else:
                 st.caption("No players entered")
 
@@ -767,7 +796,8 @@ def _render_player_scout(team1_name, team2_name):
             st.markdown(f"**{team2_name}**")
             if xi2:
                 for p in xi2:
-                    _player_bowling_card(p, bowl_lookup.get(p, {}))
+                    stats, resolved = get_resolved_stats(p, bowl_lookup)
+                    _player_bowling_card(p, stats)
             else:
                 st.caption("No players entered")
 
@@ -779,8 +809,8 @@ def _render_player_scout(team1_name, team2_name):
             rows = []
             for team_name, xi in [(team1_name, xi1), (team2_name, xi2)]:
                 for p in xi:
-                    b = bat_lookup.get(p, {})
-                    w = bowl_lookup.get(p, {})
+                    b, _ = get_resolved_stats(p, bat_lookup)
+                    w, _ = get_resolved_stats(p, bowl_lookup)
                     rows.append({
                         "Team"   : team_name,
                         "Player" : p,

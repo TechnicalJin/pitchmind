@@ -38,6 +38,14 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from datetime import datetime
 
+# ── NAME RESOLUTION ───────────────────────────────────────────────────────────
+try:
+    from name_resolver import resolve_name
+    NAME_RESOLVER_OK = True
+except ImportError:
+    NAME_RESOLVER_OK = False
+    resolve_name = lambda x: x
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 MODELS_DIR = "models"
 DATA_DIR   = "data"
@@ -103,6 +111,14 @@ def get_phase_key(phase_name):
 # ══════════════════════════════════════════════════════════════════════════════
 def get_batter_sr(name, phase_key, batter_sr_lookup):
     """Returns career SR for given batter in given phase."""
+    # Try name resolution first
+    if NAME_RESOLVER_OK:
+        resolved = resolve_name(name)
+        if resolved:
+            info = batter_sr_lookup.get(resolved, {})
+            if info:
+                return info.get(phase_key, info.get("overall", DEFAULT_BATTER_SR))
+    # Fallback to original name
     info = batter_sr_lookup.get(name, {})
     return info.get(phase_key, info.get("overall", DEFAULT_BATTER_SR))
 
@@ -110,6 +126,14 @@ def get_batter_sr(name, phase_key, batter_sr_lookup):
 def get_bowler_eco(name, phase_key, bowler_eco_lookup):
     """Returns career economy for given bowler in given phase."""
     eco_key = {"powerplay": "pp", "middle": "overall", "death": "death"}[phase_key]
+    # Try name resolution first
+    if NAME_RESOLVER_OK:
+        resolved = resolve_name(name)
+        if resolved:
+            info = bowler_eco_lookup.get(resolved, {})
+            if info:
+                return info.get(eco_key, info.get("overall", DEFAULT_BOWLER_ECO))
+    # Fallback to original name
     info = bowler_eco_lookup.get(name, {})
     return info.get(eco_key, info.get("overall", DEFAULT_BOWLER_ECO))
 
