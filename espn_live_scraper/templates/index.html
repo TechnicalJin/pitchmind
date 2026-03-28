@@ -20,6 +20,7 @@
         <div class="logo">🏏 CRICTRACK</div>
         <div class="subtitle">LIVE IPL 2026 — POWERED BY CRICAPI</div>
         <div id="api-quota" class="quota-badge">API QUOTA: — / 100</div>
+        <div id="cache-status" class="cache-badge">📦 CACHE: —</div>
     </header>
 
     <main>
@@ -59,8 +60,13 @@
         <div id="tab-schedule" class="tab-content">
             <div class="section-header">
                 <h2>📅 IPL 2026 FULL SCHEDULE</h2>
-                <button class="btn-primary" onclick="fetchSchedule()">LOAD SCHEDULE</button>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn-primary" onclick="fetchSchedule()">LOAD SCHEDULE</button>
+                    <button class="btn-secondary" onclick="fetchScheduleFresh()" title="Fetch fresh from API (uses 1 credit)">REFRESH</button>
+                    <button class="btn-secondary" onclick="exportMatchIds()" title="Download all match IDs as JSON">EXPORT IDs</button>
+                </div>
             </div>
+            <div id="schedule-cache-info" class="cache-info" style="display:none;"></div>
             <div id="schedule-filter" class="filter-row" style="display:none;">
                 <input type="text" id="team-filter" placeholder="Filter by team name..." oninput="filterSchedule()">
             </div>
@@ -238,10 +244,72 @@
                 updateQuota(data.api_hits_today, data.api_hits_limit);
                 allScheduleMatches = data.matches;
                 document.getElementById('schedule-filter').style.display = 'flex';
+
+                // Show cache status
+                if (data.from_cache) {
+                    const cacheInfo = document.getElementById('schedule-cache-info');
+                    cacheInfo.innerHTML = `<div class="info-box">📦 Data loaded from cache (${data.cached_at})<br><small>No API credits used!</small></div>`;
+                    cacheInfo.style.display = 'block';
+                } else {
+                    const cacheInfo = document.getElementById('schedule-cache-info');
+                    cacheInfo.innerHTML = `<div class="success-box">✅ Schedule fetched fresh from CricAPI (1 credit used) and cached for future use</div>`;
+                    cacheInfo.style.display = 'block';
+                }
+
                 renderSchedule(data.matches);
             } catch (e) {
                 out.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
             }
+        }
+
+        async function fetchScheduleFresh() {
+            const out = document.getElementById('schedule-output');
+            out.innerHTML = '<div class="loading">📅 REFRESHING FROM API (uses 1 credit)...</div>';
+            try {
+                const res  = await fetch('/series?fresh=true');
+                const data = await res.json();
+                if (data.error) {
+                    out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`;
+                    return;
+                }
+                updateQuota(data.api_hits_today, data.api_hits_limit);
+                allScheduleMatches = data.matches;
+                document.getElementById('schedule-filter').style.display = 'flex';
+
+                const cacheInfo = document.getElementById('schedule-cache-info');
+                cacheInfo.innerHTML = `<div class="success-box">✅ Fresh data from CricAPI (1 credit used)</div>`;
+                cacheInfo.style.display = 'block';
+
+                renderSchedule(data.matches);
+            } catch (e) {
+                out.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+            }
+        }
+
+        function exportMatchIds() {
+            if (!allScheduleMatches.length) {
+                alert('⚠️ No matches loaded. Click "LOAD SCHEDULE" first.');
+                return;
+            }
+
+            const matchIds = {};
+            allScheduleMatches.forEach(m => {
+                matchIds[m.id] = {
+                    "name": m.name,
+                    "date": m.dateTimeGMT,
+                    "venue": m.venue,
+                    "teams": m.teams
+                };
+            });
+
+            const dataStr = JSON.stringify(matchIds, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `ipl_2026_matches_${new Date().toISOString().split('T')[0]}.json`;
+            link.click();
+            URL.revokeObjectURL(url);
         }
 
         function filterSchedule() {

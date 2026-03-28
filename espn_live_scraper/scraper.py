@@ -7,6 +7,10 @@ Sign up: https://cricapi.com/
 """
 
 import requests
+try:
+    from .cache_manager import save_matches_to_cache, load_matches_from_cache
+except ImportError:
+    from cache_manager import save_matches_to_cache, load_matches_from_cache
 
 BASE_URL = "https://api.cricapi.com/v1"
 
@@ -131,11 +135,38 @@ def fetch_match_score(api_key: str, match_id: str) -> dict:
     }
 
 
-def fetch_match_info(api_key: str, series_id: str) -> dict:
+def fetch_match_info(api_key: str, series_id: str, use_cache: bool = True) -> dict:
     """
     Fetch full series info + all match list.
     Endpoint: GET /v1/series_info
+
+    Args:
+        api_key: CricAPI key
+        series_id: Series ID to fetch
+        use_cache: If True, load from cache first. If cache misses, fetch & save to cache.
     """
+    # Try cache first
+    if use_cache:
+        cached_data = load_matches_from_cache()
+        if cached_data:
+            # Return from cache with a note
+            return {
+                "series": {
+                    "name"          : "IPL 2026",
+                    "start_date"    : "2026-03-27",
+                    "end_date"      : "2026-06-01",
+                    "total_matches" : cached_data.get("total_matches"),
+                    "source"        : "cache",
+                },
+                "total_matches"  : cached_data.get("total_matches"),
+                "matches"        : cached_data.get("matches", []),
+                "api_hits_today" : "N/A",
+                "api_hits_limit" : 100,
+                "from_cache"     : True,
+                "cached_at"      : cached_data.get("fetched_at"),
+            }
+
+    # Fetch fresh from API
     data = _get("series_info", {"apikey": api_key, "id": series_id})
     if "error" in data:
         return data
@@ -150,6 +181,9 @@ def fetch_match_info(api_key: str, series_id: str) -> dict:
         key=lambda x: x.get("dateTimeGMT", "")
     )
 
+    # Save to cache
+    save_matches_to_cache(match_list_sorted)
+
     return {
         "series": {
             "name"          : info.get("name"),
@@ -163,4 +197,5 @@ def fetch_match_info(api_key: str, series_id: str) -> dict:
         "matches"        : match_list_sorted,
         "api_hits_today" : data.get("info", {}).get("hitsToday", "N/A"),
         "api_hits_limit" : data.get("info", {}).get("hitsLimit", 100),
+        "from_cache"     : False,
     }

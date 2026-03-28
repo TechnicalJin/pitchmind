@@ -35,7 +35,8 @@ def series():
     """Fetch IPL 2026 series info with all matches"""
     # IPL 2026 series ID on CricAPI
     series_id = "87c62aac-bc3c-4738-ab93-19da0690488f"
-    data = fetch_match_info(API_KEY, series_id)
+    fresh = request.args.get("fresh", "false").lower() == "true"
+    data = fetch_match_info(API_KEY, series_id, use_cache=(not fresh))
     return jsonify(data)
 
 
