@@ -13,20 +13,17 @@ HOW TO INTEGRATE:
              render_live_match_tab()
 
 FEATURES:
-  ✅ Ball-by-ball live score input (manual OR auto-fetch via ESPNcricinfo)
+  ✅ Ball-by-ball live score input (manual OR one-shot Cricdata fetch by match ID)
   ✅ Phase tracker (Powerplay / Middle / Death)
   ✅ Batsman strike rate display (live + career)
   ✅ Bowler economy display (live + career)
   ✅ Predicted phase total with confidence range
   ✅ Predicted final innings total
   ✅ Phase progress bar + run rate gauge
-  ✅ Auto-refresh every 30 seconds (toggle)
 """
 
 import os
 import json
-import time
-import requests
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -294,93 +291,103 @@ def project_final_score(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LIVE SCORE FETCH (ESPNcricinfo — extends your 5_live_data_fetch.py)
+# CRICDATA LIVE (match UUID — same as Match Predictor sidebar)
 # ══════════════════════════════════════════════════════════════════════════════
-def fetch_live_innings(match_id):
-    """
-    Fetches current live innings state from ESPNcricinfo.
-    Returns dict with score/wickets/over/striker/non_striker/bowler or None.
-    """
-    if not match_id:
-        return None
+try:
+    from cricdata_live import fetch_live_match_for_dashboard, merge_manual_fields
+except ImportError:
+    fetch_live_match_for_dashboard = None
+    merge_manual_fields = None
 
-    url = f"https://www.espncricinfo.com/matches/engine/match/{match_id}.json"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+
+def _overs_float_to_over_ball(overs_f: float):
+    if overs_f is None:
+        return 0, 0
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        o = float(overs_f)
+    except (TypeError, ValueError):
+        return 0, 0
+    whole = int(o)
+    frac_balls = int(round((o - whole) * 6))
+    frac_balls = max(0, min(5, frac_balls))
+    return whole, frac_balls
 
-        innings = data.get("innings", [])
-        if not innings:
-            return None
 
-        # Latest active innings
-        active_inn = None
-        for inn in reversed(innings):
-            if inn.get("live_current_name") or inn.get("runs") is not None:
-                active_inn = inn
-                break
-
-        if not active_inn:
-            active_inn = innings[-1]
-
-        runs     = int(active_inn.get("runs", 0) or 0)
-        wickets  = int(active_inn.get("wickets", 0) or 0)
-        overs    = active_inn.get("overs", "0.0")
-
-        try:
-            parts    = str(overs).split(".")
-            over_no  = int(parts[0])
-            ball_no  = int(parts[1]) if len(parts) > 1 else 0
-        except Exception:
-            over_no, ball_no = 0, 0
-
-        # Bat/bowl info
-        bat_info  = active_inn.get("bat", [])
-        bowl_info = active_inn.get("bowl", [])
-
-        striker = non_striker = bowler = ""
-        for b in bat_info:
-            if b.get("live_current_name") == "striker":
-                striker = b.get("known_as", b.get("name_full", ""))
-            elif b.get("live_current_name") == "non-striker":
-                non_striker = b.get("known_as", b.get("name_full", ""))
-        for bw in bowl_info:
-            if bw.get("live_current_name") == "current":
-                bowler = bw.get("known_as", bw.get("name_full", ""))
-
-        return {
-            "runs"       : runs,
-            "wickets"    : wickets,
-            "over"       : over_no,
-            "ball"       : ball_no,
-            "striker"    : striker,
-            "non_striker": non_striker,
-            "bowler"     : bowler,
-            "fetched_at" : datetime.now().strftime("%H:%M:%S"),
-        }
-    except Exception as e:
-        return {"error": str(e)}
+def _apply_cricdata_to_session_state(payload: dict) -> None:
+    """Push Cricdata payload into Streamlit widget session keys."""
+    if not payload:
+        return
+    cs = payload.get("current_score") or {}
+    runs = int(cs.get("runs") or 0)
+    wickets = int(cs.get("wickets") or 0)
+    co, cb = _overs_float_to_over_ball(cs.get("overs"))
+    st.session_state["lt_runs"] = runs
+    st.session_state["lt_wkts"] = wickets
+    st.session_state["lt_over"] = co
+    st.session_state["lt_ball"] = cb
+    bat = payload.get("batters") or {}
+    if bat.get("striker"):
+        st.session_state["lt_striker"] = bat["striker"]
+    if bat.get("non_striker"):
+        st.session_state["lt_non_striker"] = bat["non_striker"]
+    if payload.get("bowler"):
+        st.session_state["lt_bowler"] = payload["bowler"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RENDER — MAIN TAB FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
-def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, all_venues=None):
+def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, all_venues=None, matches_df=None):
     """
     Call this inside your Streamlit tab:
         with tab_live:
-            render_live_match_tab(team1, team2, venue, all_teams, all_venues)
+            render_live_match_tab(team1, team2, venue, all_teams, all_venues, matches_df)
     """
+    _LT_INPUT_VER = 2
+    if st.session_state.get("_lt_input_version") != _LT_INPUT_VER:
+        for k, v in (
+            ("lt_runs", 0),
+            ("lt_wkts", 0),
+            ("lt_over", 0),
+            ("lt_ball", 0),
+            ("lt_striker", ""),
+            ("lt_non_striker", ""),
+            ("lt_bowler", ""),
+        ):
+            st.session_state[k] = v
+        st.session_state["_lt_input_version"] = _LT_INPUT_VER
+
     st.markdown("## 🔴 Live In-Match Run Predictor")
     st.caption("Track live score → predict phase totals & final score using ML + batsman SR + bowler economy")
+
+    with st.expander("📈 Historical team form & H2H (completed IPL)", expanded=False):
+        try:
+            from pitchmind_player_features import (
+                load_matches,
+                get_team_last_n_results,
+                get_h2h_last_n_summaries,
+            )
+            m_hist = matches_df if matches_df is not None else load_matches()
+            if m_hist is not None and len(m_hist) > 0 and team1 and team2:
+                st.caption(
+                    "From `matches*.csv`: newest match first, only **before today** — uses 2025/earlier "
+                    "when the current season has no finished games yet."
+                )
+                f1, _ = get_team_last_n_results(m_hist, team1, n=5)
+                f2, _ = get_team_last_n_results(m_hist, team2, n=5)
+                st.markdown(f"**{team1}** last 5: **{f1}**")
+                st.markdown(f"**{team2}** last 5: **{f2}**")
+                h2h = get_h2h_last_n_summaries(m_hist, team1, team2, n=3)
+                if h2h:
+                    st.markdown("**Last 3 head-to-head:**")
+                    for line in h2h:
+                        st.markdown("- " + line)
+                else:
+                    st.caption("No H2H rows for this pair in the dataset.")
+            else:
+                st.caption("Match history not loaded.")
+        except Exception:
+            st.caption("Team form helpers unavailable.")
 
     # Load models
     models, lookups = load_phase_models()
@@ -405,16 +412,16 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
         # Use selectbox with IPL teams if available, else default list
         if all_teams is None:
             all_teams = [
-                "Chennai Super Kings", "Mumbai Indians",
-                "Royal Challengers Bengaluru", "Kolkata Knight Riders",
-                "Delhi Capitals", "Punjab Kings", "Rajasthan Royals",
-                "Sunrisers Hyderabad", "Lucknow Super Giants", "Gujarat Titans",
+                "chennai super kings", "mumbai indians",
+                "royal challengers bengaluru", "kolkata knight riders",
+                "delhi capitals", "punjab kings", "rajasthan royals",
+                "sunrisers hyderabad", "lucknow super giants", "gujarat titans",
             ]
         if all_venues is None:
             all_venues = [
-                "Wankhede Stadium", "M Chinnaswamy Stadium",
-                "Eden Gardens", "MA Chidambaram Stadium, Chepauk",
-                "Arun Jaitley Stadium", "Rajiv Gandhi International Stadium",
+                "wankhede stadium", "m chinnaswamy stadium",
+                "eden gardens", "ma chidambaram stadium, chepauk",
+                "arun jaitley stadium", "rajiv gandhi international stadium",
             ]
 
         # Default to passed team1/team2 if provided
@@ -431,40 +438,32 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
         venue = st.selectbox("🏟️ Venue", all_venues, index=default_venue_idx, key="lt_venue")
 
         st.markdown("---")
-        st.markdown("### 🔄 Data Source")
-        data_mode = st.radio(
-            "Input mode",
-            ["Manual Entry", "Auto-Fetch (ESPNcricinfo)"],
-            key="lt_data_mode",
+        st.markdown("### 🔄 Live data (Cricdata)")
+        st.caption(
+            "Match ID is set in the **sidebar** under Match Setup. "
+            "Use **Fetch / Refresh** on the right — no auto-polling (saves API quota)."
         )
-
-        if data_mode == "Auto-Fetch (ESPNcricinfo)":
-            match_id_input = st.text_input(
-                "ESPNcricinfo Match ID",
-                value="",
-                help="Found in match URL, e.g. espncricinfo.com/series/xxx/match/1512773/",
-                key="lt_match_id",
-            )
-            auto_refresh = st.toggle("Auto-refresh every 30s", value=False, key="lt_auto_refresh")
-        else:
-            match_id_input = ""
-            auto_refresh   = False
 
         st.markdown("---")
         st.markdown("### 📊 Current Score")
 
-        total_runs    = st.number_input("Total Runs",    min_value=0, max_value=400, value=30,  step=1, key="lt_runs")
-        total_wickets = st.number_input("Wickets Down",  min_value=0, max_value=10,  value=0,   step=1, key="lt_wkts")
-        current_over  = st.number_input("Current Over",  min_value=0, max_value=19,  value=2,   step=1, key="lt_over",
-                                         help="0 = before over 1, 5 = over 6 in progress")
-        current_ball  = st.number_input("Ball in Over",  min_value=0, max_value=6,   value=3,   step=1, key="lt_ball")
+        total_runs = st.number_input(
+            "Total Runs", min_value=0, max_value=400, step=1, key="lt_runs",
+            help="Set manually or use Fetch when the match is live.",
+        )
+        total_wickets = st.number_input("Wickets Down", min_value=0, max_value=10, step=1, key="lt_wkts")
+        current_over = st.number_input(
+            "Current Over", min_value=0, max_value=19, step=1, key="lt_over",
+            help="0 = before over 1, 5 = over 6 in progress",
+        )
+        current_ball = st.number_input("Ball in Over", min_value=0, max_value=6, step=1, key="lt_ball")
 
         st.markdown("---")
         st.markdown("### 🏏 At Crease")
 
-        striker     = st.text_input("Striker",     value="V Kohli",      key="lt_striker")
-        non_striker = st.text_input("Non-Striker", value="R Sharma",     key="lt_non_striker")
-        bowler      = st.text_input("Current Bowler", value="",          key="lt_bowler")
+        striker = st.text_input("Striker", key="lt_striker")
+        non_striker = st.text_input("Non-Striker", key="lt_non_striker")
+        bowler = st.text_input("Current Bowler", key="lt_bowler")
 
         st.markdown("---")
         st.markdown("### 📈 Phase Runs (fill after phase ends)")
@@ -472,24 +471,58 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
         mid_runs   = st.number_input("Middle Runs    (7–15)",  min_value=0, max_value=150, value=0, key="lt_mid")
         death_runs = st.number_input("Death Runs    (16–20)",  min_value=0, max_value=150, value=0, key="lt_death")
 
-    # ── AUTO-FETCH ────────────────────────────────────────────────────────────
+    # ── CRICDATA FETCH (manual) ───────────────────────────────────────────────
     with col_live:
-        if data_mode == "Auto-Fetch (ESPNcricinfo)" and match_id_input:
-            if st.button("🔄 Fetch Now", key="lt_fetch_btn") or auto_refresh:
-                with st.spinner("Fetching live data..."):
-                    live = fetch_live_innings(match_id_input)
-                if live and "error" not in live:
-                    st.success(f"✅ Fetched at {live['fetched_at']}")
-                    # Update state from live data
-                    total_runs    = live["runs"]
-                    total_wickets = live["wickets"]
-                    current_over  = live["over"]
-                    current_ball  = live["ball"]
-                    striker       = live["striker"]    or striker
-                    non_striker   = live["non_striker"] or non_striker
-                    bowler        = live["bowler"]      or bowler
-                elif live and "error" in live:
-                    st.error(f"❌ Fetch failed: {live['error']}")
+        mid_sidebar = (st.session_state.get("ms_match_id") or "").strip()
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            do_lt_fetch = st.button(
+                "⬇️ Fetch Data", key="lt_fetch_btn", disabled=not mid_sidebar, width="stretch"
+            )
+        with fc2:
+            do_lt_refresh = st.button(
+                "🔄 Refresh Data", key="lt_refresh_btn", disabled=not mid_sidebar, width="stretch"
+            )
+        if not mid_sidebar:
+            st.warning("Enter a **Cricdata match ID** in the sidebar (Match Setup).")
+        elif do_lt_fetch or do_lt_refresh:
+            if fetch_live_match_for_dashboard is None:
+                st.error("cricdata_live module not available.")
+            else:
+                with st.spinner("CricAPI match_info…"):
+                    payload, err = fetch_live_match_for_dashboard(
+                        mid_sidebar,
+                        dataset_teams=list(all_teams),
+                        dataset_venues=list(all_venues),
+                        include_bbb=True,
+                    )
+                if err:
+                    st.error("Fetch failed: " + str(err))
+                else:
+                    live_path = os.path.join("data", "live", "todays_match.json")
+                    prev = {}
+                    if os.path.exists(live_path):
+                        try:
+                            with open(live_path, encoding="utf-8") as rf:
+                                prev = json.load(rf)
+                        except Exception:
+                            prev = {}
+                    merged = merge_manual_fields(prev, payload) if merge_manual_fields else payload
+                    os.makedirs(os.path.dirname(live_path), exist_ok=True)
+                    with open(live_path, "w", encoding="utf-8") as wf:
+                        json.dump(merged, wf, indent=2, ensure_ascii=False)
+                    _apply_cricdata_to_session_state(payload)
+                    st.session_state["pending_live_sidebar"] = merged
+                    st.success("✅ Loaded score & players — also saved to data/live/todays_match.json")
+                    st.rerun()
+
+        total_runs = st.session_state.get("lt_runs", 0)
+        total_wickets = st.session_state.get("lt_wkts", 0)
+        current_over = st.session_state.get("lt_over", 0)
+        current_ball = st.session_state.get("lt_ball", 0)
+        striker = st.session_state.get("lt_striker", "")
+        non_striker = st.session_state.get("lt_non_striker", "")
+        bowler = st.session_state.get("lt_bowler", "")
 
         # ── COMPUTE EVERYTHING ────────────────────────────────────────────────
         phase_name, (p_start, p_end) = get_phase(current_over), (
@@ -657,14 +690,8 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
             f"Projected: {max(0,pp_bar)+max(0,mid_bar)+max(0,death_bar)} total",
             color="white", fontsize=11
         )
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
-
-        # ── AUTO REFRESH ──────────────────────────────────────────────────────
-        if auto_refresh and data_mode == "Auto-Fetch (ESPNcricinfo)":
-            st.caption(f"⏱ Auto-refreshing every 30 seconds...")
-            time.sleep(30)
-            st.rerun()
 
         st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}  "
                    f"| Models: {'✅ Loaded' if models_loaded else '⚠️ Fallback mode'}")

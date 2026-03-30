@@ -14,7 +14,7 @@ Output:
 import os
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 LIVE_DIR = os.path.join("data", "live")
@@ -59,14 +59,14 @@ VENUE_COORDS = {
 #   "
 
 MATCH_CONFIG = {
-    "team1"            : "India",
-    "team2"            : "New Zealand",
-    "match_name"       : "IND vs NZ — T20 World Cup Final",
-    "venue_name"       : "Narendra Modi Stadium",
-    "match_date"       : "2026-03-08",
-    "series"           : "ICC Men's T20 World Cup 2025-26",
-    "cricapi_match_id" : None,           # ← PASTE YOUR MATCH ID HERE
-    "openweather_api_key": None,         # ← add yours from openweathermap.org
+    "team1"               : "royal challengers bengaluru",
+    "team2"               : "sunrisers hyderabad",
+    "match_name"          : "IPL 2026 — use Cricdata fetch in dashboard for live name",
+    "venue_name"        : "M Chinnaswamy Stadium",
+    "match_date"        : "2026-03-28",
+    "league"            : "IPL",
+    "cricapi_match_id"  : "55fe0f15-6eb0-4ad5-835b-5564be4f6a21",
+    "openweather_api_key": None,
 }
 
 
@@ -225,54 +225,43 @@ def fetch_weather(venue_name: str, api_key: str) -> dict:
         return {}
 
 
-# ── BUILD todays_match.json ────────────────────────────────────────────────────
+# ── BUILD todays_match.json (IPL / Cricdata schema) ───────────────────────────
 def build_live_json(auto_data: dict | None, weather_data: dict) -> dict:
     """
-    Merges CricAPI data + weather into the exact JSON structure
-    that 4_dashboard.py expects via load_live_match().
-
-    Fields read by dashboard:
-        match_name, venue, match_date, series
-        toss_winner, toss_decision, pitch_type, dew_expected
-        weather { temperature_c, humidity_pct, dew_point_approx, description }
-        team1_xi, team2_xi
-        expert_notes
+    Output matches `cricdata_live.build_todays_match_payload` / dashboard load_live_match.
+    Optional weather is stored only if the key exists and is non-empty (OpenWeather).
     """
-    return {
-        # ── Match identity ────────────────────────────────────────────────────
-        "match_name"    : MATCH_CONFIG["match_name"],
-        "match_date"    : MATCH_CONFIG["match_date"],
-        "series"        : MATCH_CONFIG["series"],
-        "venue"         : MATCH_CONFIG["venue_name"],
-        "team1"         : MATCH_CONFIG["team1"],
-        "team2"         : MATCH_CONFIG["team2"],
-
-        # ── Toss (from CricAPI or None → fill via dashboard) ──────────────────
-        "toss_winner"   : auto_data.get("toss_winner")   if auto_data else None,
-        "toss_decision" : auto_data.get("toss_decision") if auto_data else None,
-
-        # ── Playing XIs (from CricAPI or [] → fill via dashboard) ─────────────
-        "team1_xi"      : auto_data.get("team1_xi", [])  if auto_data else [],
-        "team2_xi"      : auto_data.get("team2_xi", [])  if auto_data else [],
-
-        # ── Weather ───────────────────────────────────────────────────────────
-        "weather"       : weather_data,
-
-        # ── Manual context (fill via dashboard Manual Entry panel) ────────────
-        "pitch_type"    : None,   # "Good" / "Dry" / "Seamer" / "Flat"
-        "dew_expected"  : None,   # "Yes-heavy" / "Yes-light" / "No" / "Unknown"
-        "expert_notes"  : "",     # paste from broadcast/commentary in dashboard
-
-        # ── Metadata ──────────────────────────────────────────────────────────
-        "data_source"   : auto_data.get("source", "manual") if auto_data else "manual",
-        "fetched_at"    : datetime.now().isoformat(),
+    mid = MATCH_CONFIG.get("cricapi_match_id") or ""
+    payload = {
+        "match_id"       : mid,
+        "match_name"     : MATCH_CONFIG["match_name"],
+        "match_date"     : MATCH_CONFIG["match_date"],
+        "league"         : MATCH_CONFIG.get("league", "IPL"),
+        "venue"          : MATCH_CONFIG["venue_name"],
+        "team1"          : MATCH_CONFIG["team1"],
+        "team2"          : MATCH_CONFIG["team2"],
+        "toss_winner"    : (auto_data.get("toss_winner") if auto_data else None) or "",
+        "toss_decision"  : (auto_data.get("toss_decision") if auto_data else None) or "",
+        "team1_xi"       : (auto_data.get("team1_xi", []) if auto_data else []),
+        "team2_xi"       : (auto_data.get("team2_xi", []) if auto_data else []),
+        "current_score"  : {"runs": 0, "wickets": 0, "overs": 0.0},
+        "batters"        : {"striker": "", "non_striker": ""},
+        "bowler"         : "",
+        "ball_by_ball"   : [],
+        "match_status"   : "",
+        "last_updated"   : datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data_source"    : "cricdata" if auto_data else "manual",
     }
+    if weather_data:
+        payload["weather"] = weather_data
+    return payload
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
     print("  PITCHMIND — Live Data Fetcher (CricAPI Edition)")
+    print(f"  {MATCH_CONFIG.get('league', 'IPL')} | match_id={MATCH_CONFIG.get('cricapi_match_id')}")
     print(f"  {MATCH_CONFIG['match_name']}")
     print(f"  {MATCH_CONFIG['match_date']}")
     print("=" * 60 + "\n")

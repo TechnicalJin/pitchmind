@@ -21,6 +21,13 @@ import streamlit as st
 import json as _json
 import datetime as _dt
 from live_match_tab import render_live_match_tab
+from cricdata_live import (
+    fetch_live_match_for_dashboard,
+    merge_manual_fields,
+    list_blank_template,
+    normalize_team_to_dataset,
+    normalize_venue_to_dataset,
+)
 
 # ── SHAP ──────────────────────────────────────────────────────────────────────
 try:
@@ -39,6 +46,10 @@ try:
         compute_bowling_stats,
         compute_h2h,
         search_players,
+        get_team_last_n_results,
+        get_h2h_last_n_summaries,
+        get_player_last_n_batting_runs_csv,
+        get_player_last_n_bowling_wickets_csv,
     )
     PLAYER_MODULE_OK = True
 except ImportError:
@@ -54,6 +65,22 @@ except ImportError:
             compute_h2h,
             search_players,
         )
+        try:
+            from pitchmind_player_features import (
+                get_team_last_n_results,
+                get_h2h_last_n_summaries,
+                get_player_last_n_batting_runs_csv,
+                get_player_last_n_bowling_wickets_csv,
+            )
+        except ImportError:
+            def get_team_last_n_results(*a, **kw):
+                return "—", []
+            def get_h2h_last_n_summaries(*a, **kw):
+                return []
+            def get_player_last_n_batting_runs_csv(*a, **kw):
+                return "—"
+            def get_player_last_n_bowling_wickets_csv(*a, **kw):
+                return "—"
         PLAYER_MODULE_OK = True
     except ImportError:
         # Final fallback: stub so dashboard runs without player module
@@ -62,6 +89,14 @@ except ImportError:
         def compute_bowling_stats(*a, **kw): return None
         def compute_h2h(*a, **kw): return {}
         def search_players(*a, **kw): return []
+        def get_team_last_n_results(*a, **kw):
+            return "—", []
+        def get_h2h_last_n_summaries(*a, **kw):
+            return []
+        def get_player_last_n_batting_runs_csv(*a, **kw):
+            return "—"
+        def get_player_last_n_bowling_wickets_csv(*a, **kw):
+            return "—"
         PLAYER_MODULE_OK = False
 
 # ── NAME RESOLVER MODULE ─────────────────────────────────────────────────────
@@ -173,17 +208,17 @@ xgb_model, rf_model, feature_cols, shap_explainer = load_models()
 def load_player_data():
     """Load deliveries + batting/bowling stats via Group-3 cache (one-shot compute)."""
     if not PLAYER_MODULE_OK:
-        return None, None, None
+        return None, None, None, None
     del_df     = _load_deliveries()
     matches_df = _load_matches()
     if del_df is None:
-        return None, None, None
+        return None, None, None, None
     # get_all_player_stats computes once and caches at module level (Group 3 fix)
     bat_df, bowl_df = get_all_player_stats(del_df, matches_df)
-    return del_df, bat_df, bowl_df
+    return del_df, bat_df, bowl_df, matches_df
 
 
-del_df, bat_df, bowl_df = load_player_data()
+del_df, bat_df, bowl_df, matches_df = load_player_data()
 
 
 # ── HELPER: get team stats from dataset ───────────────────────────────────────
@@ -400,161 +435,319 @@ def save_live_match(data):
         _json.dump(data, f, indent=2)
 
 
+def _apply_live_payload_to_session(live: dict, all_teams: list, all_venues: list) -> None:
+    """Align sidebar Match Setup with API/file payload. Call only BEFORE ms_* widgets mount."""
+    if not live:
+        return
+    t1, t2 = live.get("team1"), live.get("team2")
+    if t1 and t1 in all_teams:
+        st.session_state["ms_team1"] = t1
+    if t2 and t2 in all_teams:
+        opts2 = [t for t in all_teams if t != st.session_state.get("ms_team1")]
+        if t2 in opts2:
+            st.session_state["ms_team2"] = t2
+    vn = live.get("venue")
+    if vn:
+        vnorm = normalize_venue_to_dataset(str(vn), all_venues)
+        if vnorm in all_venues:
+            st.session_state["ms_venue"] = vnorm
+    tw = live.get("toss_winner")
+    td = live.get("toss_decision")
+    team1 = st.session_state.get("ms_team1")
+    team2 = st.session_state.get("ms_team2")
+    if tw and team1 and team2 and tw in (team1, team2):
+        st.session_state["ms_toss"] = tw
+    if td in ("bat", "field"):
+        st.session_state["ms_toss_dec"] = td
+
+
+_IPL_SCHEDULE_PATH = os.path.join("espn_live_scraper", "cache", "ipl_2026_matches.json")
+
+
+def lookup_schedule_match(match_id: str):
+    """IPL fixture row from cached schedule (by CricAPI match UUID)."""
+    if not match_id or not os.path.exists(_IPL_SCHEDULE_PATH):
+        return None
+    try:
+        with open(_IPL_SCHEDULE_PATH, encoding="utf-8") as f:
+            data = _json.load(f)
+        for m in data.get("matches", []):
+            if m.get("id") == match_id:
+                return m
+    except Exception:
+        return None
+    return None
+
+
+def _hydrate_match_setup_from_file_and_schedule(all_teams: list, all_venues: list) -> None:
+    """When match_id changes, pre-fill teams/venue from todays_match.json or IPL schedule cache."""
+    mid = (st.session_state.get("ms_match_id") or "").strip()
+    if not mid:
+        return
+    live = load_live_match()
+    if live and str(live.get("match_id", "")).strip() == mid:
+        _apply_live_payload_to_session(live, all_teams, all_venues)
+        return
+    sm = lookup_schedule_match(mid)
+    if not sm:
+        return
+    teams = sm.get("teams") or []
+    t1_raw = teams[0] if len(teams) > 0 else ""
+    t2_raw = teams[1] if len(teams) > 1 else ""
+    t1 = normalize_team_to_dataset(t1_raw, all_teams)
+    t2 = normalize_team_to_dataset(t2_raw, all_teams)
+    if t1 in all_teams:
+        st.session_state["ms_team1"] = t1
+    if t2 in all_teams:
+        opts2 = [t for t in all_teams if t != st.session_state.get("ms_team1")]
+        if t2 in opts2:
+            st.session_state["ms_team2"] = t2
+    vnorm = normalize_venue_to_dataset(sm.get("venue") or "", all_venues)
+    if vnorm in all_venues:
+        st.session_state["ms_venue"] = vnorm
+
+
 # ── LIVE DATA PANEL ───────────────────────────────────────────────────────────
-def render_live_panel(team1_name, team2_name):
+def render_live_panel(team1_name, team2_name, all_teams: list, all_venues: list):
     st.markdown("---")
     st.markdown("## 🔴 Live Match Data")
+    st.caption(
+        "Manual fetch only (no auto-refresh). Each click uses your CricAPI quota (~100/day). "
+        "Player names are mapped via `data/name_map.json` where possible."
+    )
 
+    live_path = os.path.join("data", "live", "todays_match.json")
     live = load_live_match()
 
-    # ── Status Banner ─────────────────────────────────────────────────────────
-    if live:
-        has_xi    = bool(live.get("team1_xi") and live.get("team2_xi"))
-        has_toss  = bool(live.get("toss_winner") and live.get("toss_decision"))
-        # FIXED: define match_name as a plain variable before using it in string
-        match_name = live.get("match_name") or "Today's Match"
+    mid = (st.session_state.get("ms_match_id") or "").strip()
+    row_a, row_b, row_c = st.columns([3, 1, 1])
+    with row_a:
+        st.markdown(
+            "**Cricdata match ID** (set in sidebar → Match Setup): `" + (mid or "—") + "`"
+        )
+    fetch_disabled = not (st.session_state.get("ms_match_id") or "").strip()
+    with row_b:
+        do_fetch = st.button("⬇️ Fetch Data", width="stretch", disabled=fetch_disabled, key="live_fetch_btn")
+    with row_c:
+        do_refresh = st.button("🔄 Refresh Data", width="stretch", disabled=fetch_disabled, key="live_refresh_btn")
 
-        if has_toss and has_xi:
-            st.success("🟢 Live data loaded — " + match_name)
-        elif has_toss:
-            st.warning("🟡 Toss data loaded — Playing XI missing")
+    if do_fetch or do_refresh:
+        mid_run = (st.session_state.get("ms_match_id") or "").strip()
+        with st.spinner("Calling CricAPI (match_info)…"):
+            existing = load_live_match() or {}
+            payload, err = fetch_live_match_for_dashboard(
+                mid_run,
+                dataset_teams=list(all_teams),
+                dataset_venues=list(all_venues),
+                include_bbb=True,
+            )
+        if err:
+            st.error("Live fetch failed: " + str(err))
+        elif payload:
+            merged = merge_manual_fields(existing, payload)
+            save_live_match(merged)
+            st.session_state["live_last_fetch_ok"] = _dt.datetime.now().isoformat(timespec="seconds")
+            st.session_state.pop("live_last_fetch_err", None)
+            st.session_state["pending_live_sidebar"] = merged
+            st.success("Live data saved to data/live/todays_match.json")
+            st.rerun()
+
+    status_col1, status_col2 = st.columns(2)
+    with status_col1:
+        if live and live.get("last_updated"):
+            st.info("Last Cricdata update: **" + str(live.get("last_updated")) + "**")
+        elif st.session_state.get("live_last_fetch_ok"):
+            st.info("Last fetch: **" + str(st.session_state["live_last_fetch_ok"]) + "**")
         else:
-            st.error("🔴 Live JSON found but missing key fields — use manual entry below")
-    else:
-        st.error("🔴 No live data file found. Run `python 5_live_data_fetch.py` or use manual entry below.")
+            st.warning("Data not fetched yet — enter a match ID and click **Fetch Data**.")
+    with status_col2:
+        if live and live.get("match_id"):
+            st.write("**Stored match_id:** `" + str(live.get("match_id")) + "`")
+
+    if not live:
         live = {}
 
-    # ── Auto-fetched Data Display ─────────────────────────────────────────────
+    # ── Status Banner ─────────────────────────────────────────────────────────
+    if live.get("data_source") == "cricdata" or live.get("match_id"):
+        mn = live.get("match_name") or "Match"
+        st.success("🟢 Live JSON loaded — " + mn)
+    elif live.get("series") and not live.get("league"):
+        st.warning("⚠️ Legacy live JSON detected — fetch again with Cricdata to migrate to IPL schema.")
+    elif live:
+        st.warning("🟡 Incomplete live file — use Fetch Data or manual overrides below.")
+
+    # ── Cricdata fields ───────────────────────────────────────────────────────
     if live:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.markdown("**📍 Match Info**")
-            st.write("**Match:** "  + str(live.get("match_name", "—")))
-            st.write("**Venue:** "  + str(live.get("venue", "—")))
-            st.write("**Date:** "   + str(live.get("match_date", "—")))
-            st.write("**Series:** " + str(live.get("series", "—")))
+            st.markdown("**📍 Match (IPL)**")
+            st.write("**Name:** " + str(live.get("match_name") or "—"))
+            st.write("**Venue:** " + str(live.get("venue") or "—"))
+            st.write("**Date:** " + str(live.get("match_date") or "—"))
+            st.write("**League:** " + str(live.get("league") or "IPL"))
+            st.write("**Status:** " + str(live.get("match_status") or "—"))
 
         with col2:
+            st.markdown("**📊 Current innings**")
+            cs = live.get("current_score") or {}
+            st.write("**Runs / Wkts:** " + str(cs.get("runs", "—")) + " / " + str(cs.get("wickets", "—")))
+            st.write("**Overs:** " + str(cs.get("overs", "—")))
             st.markdown("**🪙 Toss**")
-            st.write("**Won Toss:** "     + str(live.get("toss_winner", "—")))
-            st.write("**Decision:** "     + str(live.get("toss_decision", "—")))
-            st.write("**Pitch Type:** "   + str(live.get("pitch_type") or "Unknown"))
-            st.write("**Dew Expected:** " + str(live.get("dew_expected") or "Unknown"))
+            st.write("**Winner:** " + str(live.get("toss_winner") or "—"))
+            st.write("**Decision:** " + str(live.get("toss_decision") or "—"))
 
         with col3:
-            st.markdown("**🌤️ Weather**")
-            wx = live.get("weather", {})
-            if wx:
-                st.write("**Temp:** "        + str(wx.get("temperature_c", "—")) + "°C")
-                st.write("**Humidity:** "    + str(wx.get("humidity_pct", "—")) + "%")
-                st.write("**Dew Point:** ~"  + str(wx.get("dew_point_approx", "—")) + "°C")
-                st.write("**Conditions:** "  + str(wx.get("description", "—")).title())
-            else:
-                st.write("Weather data not available")
+            st.markdown("**🏏 Crease (mapped names)**")
+            bat = live.get("batters") or {}
+            st.write("**Striker:** `" + str(bat.get("striker") or "—") + "`")
+            st.write("**Non-striker:** `" + str(bat.get("non_striker") or "—") + "`")
+            st.write("**Bowler:** `" + str(live.get("bowler") or "—") + "`")
+            note = live.get("ball_by_ball_note")
+            if note:
+                st.caption("BBB note: " + str(note))
 
-        # Playing XIs
+        bbb = live.get("ball_by_ball") or []
+        if bbb:
+            st.markdown("**📜 Ball-by-ball (latest " + str(min(len(bbb), 120)) + ")**")
+            st.dataframe(pd.DataFrame(bbb[-120:]), width="stretch", height=280)
+        elif live.get("bbb_enabled") is False:
+            st.caption("Ball-by-ball not enabled for this fixture yet (CricAPI `bbbEnabled`).")
+
         if live.get("team1_xi") or live.get("team2_xi"):
             st.markdown("**🏏 Playing XIs**")
             xi_col1, xi_col2 = st.columns(2)
             with xi_col1:
-                st.markdown("**" + team1_name + "**")
+                st.markdown("**" + str(live.get("team1") or team1_name) + "**")
                 for i, p in enumerate(live.get("team1_xi", []), 1):
                     st.write(str(i) + ". " + str(p))
             with xi_col2:
-                st.markdown("**" + team2_name + "**")
+                st.markdown("**" + str(live.get("team2") or team2_name) + "**")
                 for i, p in enumerate(live.get("team2_xi", []), 1):
                     st.write(str(i) + ". " + str(p))
 
-        if live.get("expert_notes"):
-            st.markdown("**📋 Expert Notes / Pitch Report**")
-            st.info(live["expert_notes"])
+    st.markdown("---")
+    st.markdown("### 📈 Team form & head-to-head (historical IPL)")
+    st.caption(
+        "From **completed** rows in `matches_clean.csv` / `matches.csv`, newest match first, "
+        "only games **on or before today**. For IPL 2026 before first result, this still shows "
+        "**2025 and earlier** form. W / L = win / loss for that team."
+    )
+    if matches_df is not None and len(matches_df) > 0 and team1_name and team2_name:
+        sf1, _ = get_team_last_n_results(matches_df, team1_name, n=5)
+        sf2, _ = get_team_last_n_results(matches_df, team2_name, n=5)
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            st.markdown(
+                f"**{team1_name}** — last 5: **{sf1}**"
+            )
+        with fcol2:
+            st.markdown(
+                f"**{team2_name}** — last 5: **{sf2}**"
+            )
+        st.markdown("**Last 3 head-to-head (match result)**")
+        h2h_lines = get_h2h_last_n_summaries(matches_df, team1_name, team2_name, n=3)
+        if h2h_lines:
+            for ln in h2h_lines:
+                st.markdown("- " + ln)
+        else:
+            st.caption("No H2H rows found — check that sidebar team labels match `matches.csv` (lowercase IPL names).")
+    else:
+        st.info("Match history not loaded — run `1_data_cleaning.py` so `data/matches_clean.csv` exists.")
 
     st.markdown("---")
 
     # ── MANUAL ENTRY SECTION ─────────────────────────────────────────────────
-    st.markdown("### 📝 Manual Entry (use if auto-fetch is incomplete or wrong)")
+    st.markdown("### 📝 Manual fallback (if Cricdata is missing fields or rate-limited)")
 
-    with st.expander("📋 Paste Commentary / Expert Pitch Report / Playing XI"):
+    with st.expander("📋 Paste notes / playing XI text"):
         st.markdown(
-            "Copy from Cricbuzz, ESPNcricinfo, or TV broadcast and paste here. "
-            "This will show alongside the model prediction so you can verify context."
+            "Paste from broadcast or team sheets. Use this only as a reference; "
+            "structured data comes from **Fetch Data**."
         )
         placeholder_text = (
             "Example:\n"
-            + team1_name + " won the toss and elected to bat first.\n"
-            + team1_name + " Playing XI: Player 1, Player 2, ...\n"
-            + team2_name + " Playing XI: Player 1, Player 2, ...\n"
-            + "Pitch Report: Hard pitch, good pace and carry."
+            + str(team1_name) + " won the toss and elected to bat first.\n"
+            + str(team1_name) + " Playing XI: Player 1, Player 2, ...\n"
+            + str(team2_name) + " Playing XI: Player 1, Player 2, ...\n"
+            + "Pitch: hard, good carry."
         )
         manual_text = st.text_area(
-            "Paste any text here:",
-            height=200,
+            "Notes:",
+            height=160,
             key="manual_raw_text",
             placeholder=placeholder_text,
         )
 
         col_a, col_b = st.columns([1, 3])
         with col_a:
-            if st.button("💾 Save Commentary"):
+            if st.button("💾 Save notes to JSON", key="save_notes_btn"):
                 if manual_text.strip():
-                    live_data = load_live_match() or {}
-                    live_data["expert_notes"]      = manual_text
+                    live_data = load_live_match() or list_blank_template(
+                        st.session_state.get("ms_match_id", "").strip()
+                    )
+                    live_data["manual_notes"] = manual_text
                     live_data["manual_updated_at"] = str(_dt.datetime.now())
                     save_live_match(live_data)
-                    st.success("✅ Saved. Refresh page to see update.")
+                    st.success("✅ Saved notes.")
                 else:
-                    st.warning("Nothing to save — paste text first.")
+                    st.warning("Nothing to save.")
 
-    with st.expander("⚙️ Manual Field Overrides"):
-        st.markdown("Override individual fields if auto-fetch got them wrong:")
+    with st.expander("⚙️ Manual field overrides"):
+        st.markdown("Override toss, pitch, dew, or XIs after a Cricdata fetch:")
 
         m_col1, m_col2 = st.columns(2)
         with m_col1:
             m_toss_winner = st.selectbox(
                 "Toss Winner",
-                ["(auto)", team1_name, team2_name],
+                ["(keep)", team1_name, team2_name],
                 key="m_toss_winner"
             )
             m_toss_decision = st.selectbox(
                 "Toss Decision",
-                ["(auto)", "bat", "field"],
+                ["(keep)", "bat", "field"],
                 key="m_toss_decision"
             )
             m_pitch = st.selectbox(
                 "Pitch Type",
-                ["(auto)", "Good/Hard", "Dry/Spin", "Seamer-friendly", "Flat/High-scoring", "Unknown"],
+                ["(keep)", "Good/Hard", "Dry/Spin", "Seamer-friendly", "Flat/High-scoring", "Unknown"],
                 key="m_pitch"
             )
         with m_col2:
             m_dew = st.selectbox(
                 "Dew Expected?",
-                ["(auto)", "Yes — heavy", "Yes — light", "No", "Unknown"],
+                ["(keep)", "Yes — heavy", "Yes — light", "No", "Unknown"],
                 key="m_dew"
             )
             m_xi1 = st.text_area(
-                team1_name + " Playing XI (one per line)",
+                str(team1_name) + " Playing XI (one per line)",
                 height=130,
                 key="m_xi1"
             )
             m_xi2 = st.text_area(
-                team2_name + " Playing XI (one per line)",
+                str(team2_name) + " Playing XI (one per line)",
                 height=130,
                 key="m_xi2"
             )
 
-        if st.button("💾 Save Field Overrides"):
-            live_data = load_live_match() or {}
-            if m_toss_winner   != "(auto)": live_data["toss_winner"]   = m_toss_winner
-            if m_toss_decision != "(auto)": live_data["toss_decision"] = m_toss_decision
-            if m_pitch         != "(auto)": live_data["pitch_type"]    = m_pitch
-            if m_dew           != "(auto)": live_data["dew_expected"]  = m_dew
+        if st.button("💾 Save field overrides", key="save_overrides_btn"):
+            live_data = load_live_match() or list_blank_template(
+                st.session_state.get("ms_match_id", "").strip()
+            )
+            if m_toss_winner != "(keep)":
+                live_data["toss_winner"] = m_toss_winner
+            if m_toss_decision != "(keep)":
+                live_data["toss_decision"] = m_toss_decision
+            if m_pitch != "(keep)":
+                live_data["pitch_type"] = m_pitch
+            if m_dew != "(keep)":
+                live_data["dew_expected"] = m_dew
             if m_xi1.strip():
                 live_data["team1_xi"] = [p.strip() for p in m_xi1.strip().splitlines() if p.strip()]
             if m_xi2.strip():
                 live_data["team2_xi"] = [p.strip() for p in m_xi2.strip().splitlines() if p.strip()]
             save_live_match(live_data)
-            st.success("✅ Overrides saved! Refresh page to see update.")
+            st.success("✅ Overrides saved.")
 
     st.markdown("---")
 
@@ -875,8 +1068,24 @@ def _render_player_scout(team1_name, team2_name):
                                 st.metric("Avg Runs",    f"{bat_s.get('recent_avg', 0):.1f}")
                             with rf_cols[1]:
                                 st.metric("Strike Rate", f"{bat_s.get('recent_sr', 0):.1f}")
+                            if del_df is not None and matches_df is not None:
+                                r_csv = get_player_last_n_batting_runs_csv(
+                                    del_df, matches_df, selected, n=5
+                                )
+                                st.markdown(
+                                    "**Last 5 match runs** (newest → oldest, comma-separated): "
+                                    f"`{r_csv}`"
+                                )
                         else:
                             st.info("No batting data found for this player.")
+                            if del_df is not None and matches_df is not None:
+                                r_csv = get_player_last_n_batting_runs_csv(
+                                    del_df, matches_df, selected, n=5
+                                )
+                                if r_csv != "—":
+                                    st.markdown(
+                                        "**Last 5 match runs:** `" + r_csv + "`"
+                                    )
 
                     with pc2:
                         st.markdown("**🎳 Bowling**")
@@ -903,8 +1112,24 @@ def _render_player_scout(team1_name, team2_name):
                                 st.metric("Economy",  f"{bowl_s.get('recent_economy', 0):.2f}")
                             with rb_cols[1]:
                                 st.metric("Wickets",  str(bowl_s.get("recent_wickets", 0)))
+                            if del_df is not None and matches_df is not None:
+                                w_csv = get_player_last_n_bowling_wickets_csv(
+                                    del_df, matches_df, selected, n=5
+                                )
+                                st.markdown(
+                                    "**Last 5 match wickets** (newest → oldest, comma-separated): "
+                                    f"`{w_csv}`"
+                                )
                         else:
                             st.info("No bowling data found for this player.")
+                            if del_df is not None and matches_df is not None:
+                                w_csv = get_player_last_n_bowling_wickets_csv(
+                                    del_df, matches_df, selected, n=5
+                                )
+                                if w_csv != "—":
+                                    st.markdown(
+                                        "**Last 5 match wickets:** `" + w_csv + "`"
+                                    )
         else:
             # Show top batters and bowlers by default
             col_a, col_b = st.columns(2)
@@ -1160,7 +1385,7 @@ def _render_shap_explanation(X_input, team1, team2, prob_t1):
                 spine.set_color("#333")
 
             plt.tight_layout(pad=0.8)
-            st.pyplot(fig, use_container_width=True)
+            st.pyplot(fig, width="stretch")
             plt.close()
 
         with text_col:
@@ -1262,7 +1487,7 @@ def _render_shap_explanation(X_input, team1, team2, prob_t1):
             if kv_rows:
                 st.dataframe(
                     pd.DataFrame(kv_rows).set_index("Feature"),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
     except Exception as e:
@@ -1271,8 +1496,49 @@ def _render_shap_explanation(X_input, team1, team2, prob_t1):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR
+# SIDEBAR — team lists + deferred Cricdata sync (before any ms_* widget binds keys)
 # ══════════════════════════════════════════════════════════════════════════════
+if df is not None:
+    all_teams = sorted(set(df["team1"].unique()) | set(df["team2"].unique()))
+    all_venues = sorted(df["venue"].unique())
+else:
+    all_teams = [
+        "chennai super kings", "mumbai indians",
+        "royal challengers bengaluru", "kolkata knight riders",
+        "delhi capitals", "punjab kings", "rajasthan royals",
+        "sunrisers hyderabad", "lucknow super giants", "gujarat titans",
+    ]
+    all_venues = [
+        "wankhede stadium", "m chinnaswamy stadium",
+        "eden gardens", "ma chidambaram stadium, chepauk",
+        "arun jaitley stadium", "rajiv gandhi international stadium",
+    ]
+all_teams = [str(t) for t in all_teams]
+all_venues = [str(v) for v in all_venues]
+
+if "ms_match_id" not in st.session_state:
+    st.session_state["ms_match_id"] = "55fe0f15-6eb0-4ad5-835b-5564be4f6a21"
+
+if "pending_live_sidebar" in st.session_state:
+    _apply_live_payload_to_session(
+        st.session_state.pop("pending_live_sidebar"),
+        all_teams,
+        all_venues,
+    )
+    st.session_state["_hydrated_for_mid"] = (st.session_state.get("ms_match_id") or "").strip()
+elif (st.session_state.get("_hydrated_for_mid") or "") != (st.session_state.get("ms_match_id") or "").strip():
+    _hydrate_match_setup_from_file_and_schedule(all_teams, all_venues)
+    st.session_state["_hydrated_for_mid"] = (st.session_state.get("ms_match_id") or "").strip()
+
+if "ms_toss_dec" not in st.session_state:
+    st.session_state["ms_toss_dec"] = "field"
+if "ms_venue" not in st.session_state or st.session_state["ms_venue"] not in all_venues:
+    if all_venues:
+        st.session_state["ms_venue"] = all_venues[0]
+if "ms_team1" not in st.session_state or st.session_state["ms_team1"] not in all_teams:
+    if all_teams:
+        st.session_state["ms_team1"] = all_teams[0]
+
 with st.sidebar:
     st.markdown("## 🏏 PitchMind")
     st.markdown("### IPL Match Predictor")
@@ -1286,39 +1552,42 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    if df is not None:
-        all_teams  = sorted(set(df["team1"].unique()) | set(df["team2"].unique()))
-        all_venues = sorted(df["venue"].unique())
-    else:
-        all_teams = [
-            "Chennai Super Kings", "Mumbai Indians",
-            "Royal Challengers Bengaluru", "Kolkata Knight Riders",
-            "Delhi Capitals", "Punjab Kings", "Rajasthan Royals",
-            "Sunrisers Hyderabad", "Lucknow Super Giants", "Gujarat Titans",
-        ]
-        all_venues = [
-            "Wankhede Stadium", "M Chinnaswamy Stadium",
-            "Eden Gardens", "MA Chidambaram Stadium",
-            "Arun Jaitley Stadium", "Rajiv Gandhi International Stadium",
-        ]
-
     st.markdown("### ⚙️ Match Setup")
-    team1 = st.selectbox("🔵 Team 1", all_teams, index=0)
-    team2 = st.selectbox(
-        "🔴 Team 2",
-        [t for t in all_teams if t != team1],
-        index=1
+    st.text_input(
+        "🆔 Cricdata match ID (required)",
+        key="ms_match_id",
+        help="Paste the CricAPI match UUID. Used for live fetch and to tie predictions to a fixture.",
     )
-    venue         = st.selectbox("🏟️ Venue", all_venues)
-    toss_winner   = st.selectbox("🪙 Toss Winner", [team1, team2])
-    toss_decision = st.selectbox("Toss Decision", ["field", "bat"])
+    team1 = st.selectbox("🔵 Team 1", all_teams, key="ms_team1")
+    opts2 = [t for t in all_teams if t != team1]
+    if "ms_team2" not in st.session_state or st.session_state["ms_team2"] not in opts2:
+        st.session_state["ms_team2"] = opts2[0]
+    team2 = st.selectbox("🔴 Team 2", opts2, key="ms_team2")
+    venue = st.selectbox("🏟️ Venue", all_venues, key="ms_venue")
+    if "ms_toss" not in st.session_state or st.session_state["ms_toss"] not in (team1, team2):
+        st.session_state["ms_toss"] = team1
+    toss_winner = st.selectbox("🪙 Toss Winner", [team1, team2], key="ms_toss")
+    toss_decision = st.selectbox("Toss Decision", ["field", "bat"], key="ms_toss_dec")
 
     st.markdown("---")
+    _mid = (st.session_state.get("ms_match_id") or "").strip()
+    _mid_ok = bool(_mid)
+    _teams_ok = (
+        _mid_ok
+        and team1 in all_teams
+        and team2 in all_teams
+        and team1 != team2
+    )
     predict_btn = st.button(
         "🎯 PREDICT WINNER",
         width="stretch",
-        type="primary"
+        type="primary",
+        disabled=not _teams_ok,
     )
+    if not _mid_ok:
+        st.caption("Enter a **Cricdata match ID** above to enable prediction.")
+    elif not _teams_ok:
+        st.caption("Pick two different teams (auto-filled from Fetch / IPL schedule when possible).")
 
     if xgb_model is None:
         st.error("⚠️ Model not found.\nRun `python 3_train_model.py` first.")
@@ -1341,10 +1610,10 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if page == "🔴 Live Match":
-    render_live_match_tab(team1, team2, venue, all_teams, all_venues)
+    render_live_match_tab(team1, team2, venue, all_teams, all_venues, matches_df)
 
 elif page == "🎯 Match Predictor":
-    render_live_panel(team1, team2)
+    render_live_panel(team1, team2, all_teams, all_venues)
 
     st.markdown("# 🏏 " + team1 + "  **vs**  " + team2)
     st.markdown("📍 **" + venue + "**  &nbsp;|&nbsp;  🪙 **" + toss_winner + "** won toss → chose to **" + toss_decision + "**")
@@ -1579,8 +1848,7 @@ elif page == "🎯 Match Predictor":
             unsafe_allow_html=True
         )
         st.caption(
-            "Player stats auto-loaded from Live Data tab. "
-            "Go to **Live Match → Manual Entry** to add/change Playing XIs."
+            "Player stats load from **data/live/todays_match.json** (Cricdata fetch or manual overrides)."
         )
 
         _bat_lkp  = bat_df.set_index("player").to_dict("index")  if len(bat_df)  > 0 else {}

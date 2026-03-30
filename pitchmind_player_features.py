@@ -387,6 +387,136 @@ def search_players(query, del_df=None):
     return [p for p in all_players if q in p.lower()]
 
 
+# ── RECENT MATCH CONTEXT (team form, H2H, player last-N) ───────────────────────
+def _as_of_timestamp(as_of):
+    if as_of is None:
+        return pd.Timestamp.now().normalize()
+    return pd.Timestamp(as_of).normalize()
+
+
+def _completed_matches_for_form(matches_df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    if matches_df is None or matches_df.empty:
+        return pd.DataFrame()
+    m = matches_df.copy()
+    m["match_id"] = m["match_id"].astype(str)
+    m = m[m["date"].notna() & (m["date"] <= as_of)]
+    m = m[m["winner"].notna() & (m["winner"].astype(str).str.strip() != "")]
+    if "result" in m.columns:
+        bad = m["result"].fillna("").astype(str).str.lower()
+        m = m[~bad.str.contains("no result")]
+        m = m[~bad.str.contains("abandon")]
+    return m
+
+
+def get_team_last_n_results(matches_df, team: str, n: int = 5, as_of=None):
+    """
+    Last n completed matches for team before as_of (default: today).
+    Returns (comma_joined 'W'/'L' most-recent-first, list of match_ids for debugging).
+    Uses historical seasons when current season has no completed games yet.
+    """
+    if matches_df is None or matches_df.empty:
+        return "—", []
+    team = (team or "").strip().lower()
+    if not team:
+        return "—", []
+    as_of = _as_of_timestamp(as_of)
+    m = _completed_matches_for_form(matches_df, as_of)
+    if m.empty:
+        return "—", []
+    side = (
+        (m["team1"].astype(str).str.lower() == team)
+        | (m["team2"].astype(str).str.lower() == team)
+    )
+    m = m[side].sort_values("date", ascending=False).head(n)
+    letters, ids = [], []
+    for _, row in m.iterrows():
+        w = str(row["winner"]).strip().lower()
+        letters.append("W" if w == team else "L")
+        ids.append(str(row["match_id"]))
+    return ",".join(letters) if letters else "—", ids
+
+
+def get_h2h_last_n_summaries(matches_df, team1: str, team2: str, n: int = 3, as_of=None):
+    """
+    Last n completed H2H fixtures between team1 and team2 (any venue), newest first.
+    Returns list of readable strings, e.g. '2024-05-12 — royal challengers bengaluru won'.
+    """
+    if matches_df is None or matches_df.empty:
+        return []
+    t1 = (team1 or "").strip().lower()
+    t2 = (team2 or "").strip().lower()
+    if not t1 or not t2 or t1 == t2:
+        return []
+    as_of = _as_of_timestamp(as_of)
+    m = _completed_matches_for_form(matches_df, as_of)
+    if m.empty:
+        return []
+    a = m["team1"].astype(str).str.lower()
+    b = m["team2"].astype(str).str.lower()
+    mask = ((a == t1) & (b == t2)) | ((a == t2) & (b == t1))
+    m = m[mask].sort_values("date", ascending=False).head(n)
+    out = []
+    for _, row in m.iterrows():
+        d = row["date"]
+        ds = d.strftime("%Y-%m-%d") if pd.notna(d) else "?"
+        w = str(row["winner"]).strip()
+        out.append(f"{ds} - {w} won")
+    return out
+
+
+def get_player_last_n_batting_runs_csv(del_df, matches_df, player: str, n: int = 5, as_of=None):
+    """
+    Comma-separated runs from player's n most recent completed innings (legal balls only).
+    Newest match first. Player id must match deliveries 'batter' column (Cricsheet name).
+    """
+    if del_df is None or matches_df is None or not player:
+        return "—"
+    as_of = _as_of_timestamp(as_of)
+    legal = del_df[
+        (del_df["batter"] == player) & (del_df["extras_type"].fillna("") != "wides")
+    ]
+    if legal.empty:
+        return "—"
+    by_m = legal.groupby("match_id", as_index=False).agg(runs=("batsman_runs", "sum"))
+    by_m["match_id"] = by_m["match_id"].astype(str)
+    meta = matches_df[["match_id", "date"]].drop_duplicates(subset=["match_id"]).copy()
+    meta["match_id"] = meta["match_id"].astype(str)
+    by_m = by_m.merge(meta, on="match_id", how="inner")
+    by_m = by_m[by_m["date"].notna() & (by_m["date"] <= as_of)]
+    by_m = by_m.sort_values("date", ascending=False).head(n)
+    if by_m.empty:
+        return "—"
+    return ",".join(str(int(x)) for x in by_m["runs"])
+
+
+def get_player_last_n_bowling_wickets_csv(del_df, matches_df, player: str, n: int = 5, as_of=None):
+    """
+    Comma-separated wicket counts (excluding run-outs credited to bowler) for n most recent
+    completed matches where the player bowled at least once. Newest first.
+    """
+    if del_df is None or matches_df is None or not player:
+        return "—"
+    as_of = _as_of_timestamp(as_of)
+    grp = del_df[del_df["bowler"] == player]
+    if grp.empty:
+        return "—"
+    rows = []
+    for mid, g in grp.groupby("match_id"):
+        mask = (g["is_wicket"] == 1) & (g["dismissal_kind"].fillna("") != "run out")
+        rows.append({"match_id": str(mid), "wkts": int(mask.sum())})
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return "—"
+    meta = matches_df[["match_id", "date"]].drop_duplicates(subset=["match_id"]).copy()
+    meta["match_id"] = meta["match_id"].astype(str)
+    per = per.merge(meta, on="match_id", how="inner")
+    per = per[per["date"].notna() & (per["date"] <= as_of)]
+    per = per.sort_values("date", ascending=False).head(n)
+    if per.empty:
+        return "—"
+    return ",".join(str(int(x)) for x in per["wkts"])
+
+
 # ── MAIN: Build & Save Full Player Features ───────────────────────────────────
 if __name__ == "__main__":
     print("=" * 60)
