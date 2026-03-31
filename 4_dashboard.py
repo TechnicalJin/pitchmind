@@ -164,19 +164,59 @@ def load_data():
 
 @st.cache_resource
 def load_models():
-    xgb_path  = os.path.join("models", "ipl_model.pkl")
+    """Load 3-model calibrated ensemble (LGBM 0.5 + XGB 0.3 + LR 0.2)"""
+    # Try to load new calibrated ensemble models (v3)
+    lgbm_cal_path = os.path.join("models", "ipl_model_lgbm_calibrated.pkl")
+    xgb_cal_path  = os.path.join("models", "ipl_model_calibrated.pkl")
+    lr_cal_path   = os.path.join("models", "ipl_model_lr_calibrated.pkl")
+
+    # Fallback to old RF+XGB models if new models don't exist
     rf_path   = os.path.join("models", "ipl_model_rf.pkl")
+    xgb_path  = os.path.join("models", "ipl_model.pkl")
     feat_path = os.path.join("models", "feature_cols.pkl")
+
+    # Check if new 3-model ensemble exists
+    new_ensemble_available = (
+        os.path.exists(lgbm_cal_path) and
+        os.path.exists(xgb_cal_path) and
+        os.path.exists(lr_cal_path)
+    )
+
+    if new_ensemble_available:
+        # Load new 3-model calibrated ensemble (v3)
+        lgbm_model = joblib.load(lgbm_cal_path)
+        xgb_model  = joblib.load(xgb_cal_path)
+        lr_model   = joblib.load(lr_cal_path)
+
+        # Get feature cols from XGB model
+        try:
+            feature_cols = xgb_model.estimator.get_booster().feature_names
+            if feature_cols is None:
+                raise ValueError("no names in booster")
+        except Exception:
+            if os.path.exists(feat_path):
+                feature_cols = joblib.load(feat_path)
+            else:
+                return None, None, None, None, None
+
+        # Build SHAP explainer for XGB (base model)
+        shap_explainer = None
+        if SHAP_OK:
+            try:
+                shap_explainer = shap.TreeExplainer(xgb_model.estimator.get_booster())
+            except Exception:
+                shap_explainer = None
+
+        return lgbm_model, xgb_model, lr_model, feature_cols, shap_explainer
+
+    # Fallback: load old 2-model ensemble (v2 compatibility)
     if not os.path.exists(xgb_path):
-        return None, None, None, None
+        return None, None, None, None, None
 
     xgb_model = joblib.load(xgb_path)
     rf_model  = joblib.load(rf_path) if os.path.exists(rf_path) else None
 
     # ── Feature cols: always read from XGBoost booster (ground truth) ─────────
-    # The booster stores the exact 47 feature names the model was trained on.
-    # This is more reliable than feature_cols.pkl which may be outdated or
-    # be the wrong pkl (e.g. phase_feature_cols.pkl has only 13 features).
     try:
         feature_cols = xgb_model.get_booster().feature_names
         if feature_cols is None:
@@ -186,11 +226,9 @@ def load_models():
         if os.path.exists(feat_path):
             feature_cols = joblib.load(feat_path)
         else:
-            return xgb_model, rf_model, None, None
+            return xgb_model, rf_model, None, None, None
 
     # ── Build SHAP TreeExplainer once and cache ────────────────────────────────
-    # TreeExplainer is exact for tree models — no sampling approximation.
-    # Building it once at startup means per-prediction SHAP is near-instant.
     shap_explainer = None
     if SHAP_OK:
         try:
@@ -198,11 +236,11 @@ def load_models():
         except Exception:
             shap_explainer = None
 
-    return xgb_model, rf_model, feature_cols, shap_explainer
+    return xgb_model, rf_model, None, feature_cols, shap_explainer
 
 
-df                                              = load_data()
-xgb_model, rf_model, feature_cols, shap_explainer = load_models()
+df                                                       = load_data()
+lgbm_model, xgb_model, lr_model, feature_cols, shap_explainer = load_models()
 
 @st.cache_data(show_spinner=False)
 def load_player_data():
@@ -225,9 +263,10 @@ del_df, bat_df, bowl_df, matches_df = load_player_data()
 def get_team_stats(team, role, venue, df):
     """
     Pull all per-team stats from master_features.csv for the most recent row.
-    FIXED (v3): now includes all 17 Group-1 features added in 2_feature_engineering.py v4:
-      - chase_win_rate, home_win_rate, win_streak, days_rest  (Change 6)
-      - squad_bat_sr, squad_bowl_econ, squad_allrounder       (Change 2)
+    Includes NEW match context features:
+      - last5_win_pct: win % in last 5 matches
+      - current_season_points: tournament standing points
+      - current_season_nrr: tournament-specific net run rate
     Defaults are neutral/average values used when data is unavailable.
     """
     default = {
@@ -248,6 +287,12 @@ def get_team_stats(team, role, venue, df):
         "squad_bat_sr":     125.0,
         "squad_bowl_econ":    8.5,
         "squad_allrounder":   2.0,
+        # NEW v5: era/recency/velocity features
+        "form_velocity":    0.0,  # neutral when no trend data
+        # NEW match context features
+        "last5_win_pct":    0.5,  # neutral when no recent data
+        "season_points":    0.0,  # neutral when no season data
+        "season_nrr":       0.0,  # neutral when no season data
     }
     if df is None:
         return default
@@ -259,9 +304,15 @@ def get_team_stats(team, role, venue, df):
 
     r = sub.iloc[-1]
 
+    # venue_win_rate may not exist in master_features.csv - use fallback
     venue_sub = sub[sub["venue"] == venue]
-    vwr = venue_sub[f"{role}_venue_win_rate"].mean() if len(venue_sub) > 0 \
-          else sub[f"{role}_venue_win_rate"].mean()
+    vwr_col = f"{role}_venue_win_rate"
+    if vwr_col in df.columns:
+        vwr = venue_sub[vwr_col].mean() if len(venue_sub) > 0 else sub[vwr_col].mean()
+    else:
+        # Fallback: use overall win_rate if venue-specific not available
+        wr_col = f"{role}_win_rate"
+        vwr = venue_sub[wr_col].mean() if (len(venue_sub) > 0 and wr_col in df.columns) else 0.5
 
     def _get(key, fallback):
         val = r.get(key, fallback)
@@ -287,7 +338,7 @@ def get_team_stats(team, role, venue, df):
         "death_economy":    _get(f"{role}_death_economy",   9.5),
         "pp_wickets":       _get(f"{role}_pp_wickets",      1.5),
         "bowling_sr":       _get(f"{role}_bowling_sr",      20.0),
-        "venue_win_rate":   float(vwr) if not np.isnan(float(vwr)) else 0.5,
+        "venue_win_rate":   float(vwr) if (vwr is not None and not np.isnan(float(vwr))) else 0.5,
         # ── NEW Group 1 Change 6: contextual features ─────────────────────────
         "chase_win_rate":   _get(f"{role}_chase_win_rate",  0.5),
         "home_win_rate":    _get(f"{role}_home_win_rate",   0.5),
@@ -297,119 +348,249 @@ def get_team_stats(team, role, venue, df):
         "squad_bat_sr":     _get(f"{role}_squad_bat_sr",    125.0),
         "squad_bowl_econ":  _get(f"{role}_squad_bowl_econ",   8.5),
         "squad_allrounder": _get(f"{role}_squad_allrounder",  2.0),
+        # ── NEW v5: form velocity (trend detection) ──────────────────────────
+        "form_velocity":    _get(f"{role}_form_velocity",   0.0),
+        # ── NEW match context features (tournament awareness) ─────────────────
+        "last5_win_pct":    _get(f"{role}_last5_win_pct",   0.5),
+        "season_points":    _get(f"current_season_points_{role}", 0.0),
+        "season_nrr":       _get(f"current_season_nrr_{role}", 0.0),
     }
 
 
 # ── HELPER: build feature vector matching trained model ───────────────────────
 def build_feature_vector(team1, team2, venue, toss_winner, toss_decision, df, feature_cols):
+    """
+    Build 32-feature vector: 4 core + 5 tournament + 8 playing XI + 4 venue + 5 toss + 6 momentum.
+    Playing XI, venue, toss, and momentum features use smart defaults for live predictions.
+    """
     s1 = get_team_stats(team1, "team1", venue, df)
     s2 = get_team_stats(team2, "team2", venue, df)
 
-    toss_win         = 1 if toss_winner == team1 else 0
-    toss_field       = 1 if toss_decision == "field" else 0
-    toss_team1_field = 1 if (toss_winner == team1 and toss_decision == "field") else 0
+    # Extract era context
+    season_recency = 1.0  # assume current season
+    if df is not None and len(df) > 0:
+        recent_row = df.iloc[-1]
+        if "season_recency" in df.columns:
+            season_recency = float(recent_row.get("season_recency", 1.0))
 
-    h2h = 0.5
-    if df is not None:
-        h2h_mask = ((df["team1"] == team1) & (df["team2"] == team2)) | \
-                   ((df["team1"] == team2) & (df["team2"] == team1))
-        h2h_data = df[h2h_mask]
-        if len(h2h_data) > 0:
-            t1_wins = (
-                ((h2h_data["team1"] == team1) & (h2h_data["target"] == 1)).sum() +
-                ((h2h_data["team2"] == team1) & (h2h_data["target"] == 0)).sum()
-            )
-            h2h = t1_wins / len(h2h_data)
+    # ── Get derived features from recent data (last5, h2h, points, nrr) ─────────
+    t1_last5 = 0.5
+    t2_last5 = 0.5
+    h2h_t1 = 0.5
+    pts_diff = 0.0
+    nrr_diff = 0.0
 
-    venue_avg = 160.0
-    if df is not None:
-        v = df[df["venue"] == venue]["venue_avg_runs"].mean()
-        if not np.isnan(v):
-            venue_avg = v
+    if df is not None and len(df) > 0:
+        t1_rows = df[df["team1"] == team1]
+        t2_rows = df[df["team2"] == team2]
 
+        if len(t1_rows) > 0:
+            t1_last5 = float(t1_rows.iloc[-1].get("team1_last5_win_pct", 0.5))
+        if len(t2_rows) > 0:
+            t2_last5 = float(t2_rows.iloc[-1].get("team2_last5_win_pct", 0.5))
+
+        h2h_rows = df[
+            ((df["team1"] == team1) & (df["team2"] == team2)) |
+            ((df["team1"] == team2) & (df["team2"] == team1))
+        ]
+        if len(h2h_rows) > 0:
+            recent_h2h = h2h_rows.iloc[-1]
+            if recent_h2h["team1"] == team1:
+                h2h_t1 = float(recent_h2h.get("last3_h2h_team1_pct", 0.5))
+            else:
+                h2h_t1 = 1.0 - float(recent_h2h.get("last3_h2h_team1_pct", 0.5))
+
+        if len(t1_rows) > 0:
+            pts_diff += float(t1_rows.iloc[-1].get("current_season_points_diff", 0.0))
+            nrr_diff += float(t1_rows.iloc[-1].get("current_season_nrr_diff", 0.0))
+        if len(t2_rows) > 0:
+            pts_diff -= float(t2_rows.iloc[-1].get("current_season_points_diff", 0.0))
+            nrr_diff -= float(t2_rows.iloc[-1].get("current_season_nrr_diff", 0.0))
+
+    # ── PLAYING XI FEATURES (smart defaults for live matches) ──────────────────
+    # For live matches without deliveries, use reasonable defaults
+    # Typical values: bat_sr=130, bowl_econ=8.4, death_bowlers=2, pp_bowlers=3
+    t1_bat_sr = 130.0
+    t2_bat_sr = 130.0
+    t1_bowl_econ = 8.4
+    t2_bowl_econ = 8.4
+    t1_death_bowlers = 2
+    t2_death_bowlers = 2
+    t1_pp_bowlers = 3
+    t2_pp_bowlers = 3
+
+    # Try to use historical data if available
+    if df is not None and len(df) > 0:
+        t1_rows = df[df["team1"] == team1]
+        t2_rows = df[df["team2"] == team2]
+
+        if len(t1_rows) > 0:
+            recent_t1 = t1_rows.iloc[-1]
+            t1_bat_sr = float(recent_t1.get("team1_playing11_bat_sr", 130.0))
+            t1_bowl_econ = float(recent_t1.get("team1_playing11_bowl_econ", 8.4))
+            t1_death_bowlers = int(recent_t1.get("team1_num_death_bowlers", 2))
+            t1_pp_bowlers = int(recent_t1.get("team1_num_pp_bowlers", 3))
+
+        if len(t2_rows) > 0:
+            recent_t2 = t2_rows.iloc[-1]
+            t2_bat_sr = float(recent_t2.get("team2_playing11_bat_sr", 130.0))
+            t2_bowl_econ = float(recent_t2.get("team2_playing11_bowl_econ", 8.4))
+            t2_death_bowlers = int(recent_t2.get("team2_num_death_bowlers", 2))
+            t2_pp_bowlers = int(recent_t2.get("team2_num_pp_bowlers", 3))
+
+    # ── VENUE & PITCH INTELLIGENCE FEATURES (defaults for live matches) ────────
+    # These features capture ground-specific dynamics
+    pitch_type = 1  # Default: slow/balanced
+    dew_factor = 1  # Assume night match (IPL is primarily evening/night)
+    boundary_size = 1  # Default: medium boundaries
+    avg_chasing_success = 0.45  # Typical ~45-50% chasing success
+
+    # Try to use historical venue data if available
+    if df is not None and len(df) > 0:
+        venue_rows = df[df["venue"] == venue]
+        if len(venue_rows) > 0:
+            recent_venue = venue_rows.iloc[-1]
+            pitch_type = int(recent_venue.get("pitch_type", 1))
+            dew_factor = int(recent_venue.get("dew_factor", 1))
+            boundary_size = int(recent_venue.get("boundary_size", 1))
+            avg_chasing_success = float(recent_venue.get("avg_chasing_success", 0.45))
+
+    # ── TOSS INTELLIGENCE FEATURES (NEW - venue-aware, context-driven) ──────────
+    # Replace weak generic toss features with meaningful venue-specific signals
+    toss_adv = 0.0     # Default: toss has neutral impact
+    t1_chase_str = 0.5  # Default: neutral chase ability
+    t2_chase_str = 0.5  # Default: neutral chase ability
+    avg_chase_succ = 0.45  # Default: typical chase win %
+
+    # Try to use historical toss impact data per venue
+    if df is not None and len(df) > 0:
+        venue_rows = df[df["venue"] == venue]
+        if len(venue_rows) > 0:
+            recent_venue = venue_rows.iloc[-1]
+            toss_adv = float(recent_venue.get("toss_advantage_at_venue", 0.0))
+            avg_chase_succ = float(recent_venue.get("avg_chasing_success", 0.45))
+
+        t1_rows = df[df["team1"] == team1]
+        if len(t1_rows) > 0:
+            recent_t1 = t1_rows.iloc[-1]
+            t1_chase_str = float(recent_t1.get("team1_chasing_strength", 0.5))
+
+        t2_rows = df[df["team2"] == team2]
+        if len(t2_rows) > 0:
+            recent_t2 = t2_rows.iloc[-1]
+            t2_chase_str = float(recent_t2.get("team2_chasing_strength", 0.5))
+
+    # Compute interaction features (team chase strength × venue chasing bias)
+    t1_chase_venue_interaction = round(t1_chase_str * avg_chase_succ, 4)
+    t2_chase_venue_interaction = round(t2_chase_str * avg_chase_succ, 4)
+
+    # ── MOMENTUM FEATURES (NEW) — HOT vs COLD detection ─────────────────────────
+    # Recent batting performance (last 3 matches)
+    t1_last_3_runs = 155.0  # Default league average
+    t2_last_3_runs = 155.0
+    # Recent bowling performance (last 3 matches)
+    t1_last_3_wickets = 6.0  # Default typical wickets per match
+    t2_last_3_wickets = 6.0
+    # Form trend (improving/declining)
+    t1_form_slope = 0.0  # Default neutral
+    t2_form_slope = 0.0
+
+    # Try to use historical momentum data if available
+    if df is not None and len(df) > 0:
+        t1_rows = df[df["team1"] == team1]
+        t2_rows = df[df["team2"] == team2]
+
+        if len(t1_rows) > 0:
+            recent_t1 = t1_rows.iloc[-1]
+            t1_last_3_runs = float(recent_t1.get("team1_last_3_match_avg_runs", 155.0))
+            t1_last_3_wickets = float(recent_t1.get("team1_last_3_match_wickets_taken", 6.0))
+            t1_form_slope = float(recent_t1.get("team1_form_trend_slope", 0.0))
+
+        if len(t2_rows) > 0:
+            recent_t2 = t2_rows.iloc[-1]
+            t2_last_3_runs = float(recent_t2.get("team2_last_3_match_avg_runs", 155.0))
+            t2_last_3_wickets = float(recent_t2.get("team2_last_3_match_wickets_taken", 6.0))
+            t2_form_slope = float(recent_t2.get("team2_form_trend_slope", 0.0))
+
+    # ── Build feature dict: 32 total features ──────────────────────────────────
     feat = {
-        # ── Team stats: original 32 ───────────────────────────────────────────
-        "team1_win_rate":        s1["win_rate"],
-        "team2_win_rate":        s2["win_rate"],
-        "team1_recent_form":     s1["recent_form"],
-        "team2_recent_form":     s2["recent_form"],
-        "h2h_win_rate":          h2h,
-        "team1_nrr":             s1["nrr"],
-        "team2_nrr":             s2["nrr"],
-        "team1_avg_runs":        s1["avg_runs"],
-        "team2_avg_runs":        s2["avg_runs"],
-        "team1_powerplay_runs":  s1["powerplay_runs"],
-        "team2_powerplay_runs":  s2["powerplay_runs"],
-        "team1_middle_runs":     s1["middle_runs"],
-        "team2_middle_runs":     s2["middle_runs"],
-        "team1_death_runs":      s1["death_runs"],
-        "team2_death_runs":      s2["death_runs"],
-        "team1_boundary_pct":    s1["boundary_pct"],
-        "team2_boundary_pct":    s2["boundary_pct"],
-        "team1_dot_ball_pct":    s1["dot_ball_pct"],
-        "team2_dot_ball_pct":    s2["dot_ball_pct"],
-        "team1_run_rate":        s1["run_rate"],
-        "team2_run_rate":        s2["run_rate"],
-        "team1_top3_sr":         s1["top3_sr"],
-        "team2_top3_sr":         s2["top3_sr"],
-        "team1_bowling_economy": s1["bowling_economy"],
-        "team2_bowling_economy": s2["bowling_economy"],
+        # BASE (4)
         "team1_death_economy":   s1["death_economy"],
-        "team2_death_economy":   s2["death_economy"],
-        "team1_pp_wickets":      s1["pp_wickets"],
-        "team2_pp_wickets":      s2["pp_wickets"],
-        "team1_bowling_sr":      s1["bowling_sr"],
-        "team2_bowling_sr":      s2["bowling_sr"],
-        "team1_venue_win_rate":  s1["venue_win_rate"],
-        "team2_venue_win_rate":  s2["venue_win_rate"],
-        # ── Venue & toss ─────────────────────────────────────────────────────
-        "venue_avg_runs":        venue_avg,
-        "toss_win":              toss_win,
-        "toss_field":            toss_field,
-        "toss_team1_field":      toss_team1_field,
-        # ── NEW Group 1 Change 6: contextual rolling features ─────────────────
-        "team1_chase_win_rate":  s1["chase_win_rate"],
-        "team2_chase_win_rate":  s2["chase_win_rate"],
-        "team1_home_win_rate":   s1["home_win_rate"],
-        "team2_home_win_rate":   s2["home_win_rate"],
-        "team1_win_streak":      s1["win_streak"],
-        "team2_win_streak":      s2["win_streak"],
-        "team1_days_rest":       s1["days_rest"],
-        "team2_days_rest":       s2["days_rest"],
-        "season_stage":          0,    # 0=group stage; override to 1 for playoff if known
-        # ── NEW Group 1 Change 2: squad-level features ────────────────────────
-        "team1_squad_bat_sr":    s1["squad_bat_sr"],
-        "team2_squad_bat_sr":    s2["squad_bat_sr"],
-        "team1_squad_bowl_econ": s1["squad_bowl_econ"],
+        "season_recency":        season_recency,
+        "team1_win_rate":        s1["win_rate"],
         "team2_squad_bowl_econ": s2["squad_bowl_econ"],
-        "team1_squad_allrounder":s1["squad_allrounder"],
-        "team2_squad_allrounder":s2["squad_allrounder"],
-        # ── Difference features: original 10 ─────────────────────────────────
-        "diff_win_rate":         s1["win_rate"]        - s2["win_rate"],
-        "diff_recent_form":      s1["recent_form"]     - s2["recent_form"],
-        "diff_avg_runs":         s1["avg_runs"]        - s2["avg_runs"],
-        "diff_death_runs":       s1["death_runs"]      - s2["death_runs"],
-        "diff_death_economy":    s2["death_economy"]   - s1["death_economy"],
-        "diff_bowling_economy":  s2["bowling_economy"] - s1["bowling_economy"],
-        "diff_pp_wickets":       s1["pp_wickets"]      - s2["pp_wickets"],
-        "diff_run_rate":         s1["run_rate"]        - s2["run_rate"],
-        "diff_nrr":              s1["nrr"]             - s2["nrr"],
-        "diff_venue_win_rate":   s1["venue_win_rate"]  - s2["venue_win_rate"],
-        # ── NEW difference features ───────────────────────────────────────────
-        "diff_chase_win_rate":   s1["chase_win_rate"]  - s2["chase_win_rate"],
-        "diff_squad_bat_sr":     s1["squad_bat_sr"]    - s2["squad_bat_sr"],
+        # TOURNAMENT (5)
+        "team1_last5_win_pct":       t1_last5,
+        "team2_last5_win_pct":       t2_last5,
+        "last3_h2h_team1_pct":       h2h_t1,
+        "current_season_points_diff": pts_diff,
+        "current_season_nrr_diff":    nrr_diff,
+        # PLAYING XI (8) - GAME CHANGER
+        "team1_playing11_bat_sr":     t1_bat_sr,
+        "team2_playing11_bat_sr":     t2_bat_sr,
+        "team1_playing11_bowl_econ":  t1_bowl_econ,
+        "team2_playing11_bowl_econ":  t2_bowl_econ,
+        "team1_num_death_bowlers":    t1_death_bowlers,
+        "team2_num_death_bowlers":    t2_death_bowlers,
+        "team1_num_pp_bowlers":       t1_pp_bowlers,
+        "team2_num_pp_bowlers":       t2_pp_bowlers,
+        # VENUE & PITCH INTELLIGENCE (4) - HIDDEN GOLD
+        "pitch_type":            pitch_type,
+        "dew_factor":            dew_factor,
+        "boundary_size":         boundary_size,
+        "avg_chasing_success":   avg_chasing_success,
+        # TOSS INTELLIGENCE (5) - VENUE-AWARE, CONTEXT-DRIVEN + INTERACTION
+        "toss_advantage_at_venue":           toss_adv,
+        "team1_chasing_strength":            t1_chase_str,
+        "team2_chasing_strength":            t2_chase_str,
+        "team1_chase_venue_interaction":     t1_chase_venue_interaction,
+        "team2_chase_venue_interaction":     t2_chase_venue_interaction,
+        # MOMENTUM (6) - HOT vs COLD DETECTION
+        "team1_last_3_match_avg_runs":       t1_last_3_runs,
+        "team2_last_3_match_avg_runs":       t2_last_3_runs,
+        "team1_last_3_match_wickets_taken":  t1_last_3_wickets,
+        "team2_last_3_match_wickets_taken":  t2_last_3_wickets,
+        "team1_form_trend_slope":            t1_form_slope,
+        "team2_form_trend_slope":            t2_form_slope,
+        # INTERACTION FEATURES (3) — FEATURE COMBINATIONS FOR TREE LEARNING
+        "batting_strength_vs_bowling_weakness"   : t1_last_3_runs * t2_bowl_econ,
+        "death_focus_vs_opponent_bowlers"        : t1_form_slope * t2_death_bowlers,
+        "wickets_taking_vs_opponent_batting"     : t1_last_3_wickets * t2_last_3_runs,
     }
 
-    return pd.DataFrame([feat])[feature_cols], s1, s2, h2h, venue_avg
+    # Verify all feature_cols are present
+    if feature_cols is not None:
+        for col in feature_cols:
+            if col not in feat:
+                feat[col] = 0.0
+
+    return pd.DataFrame([feat])[feature_cols], s1, s2, 0.5, 160.0
 
 
 # ── PREDICT ───────────────────────────────────────────────────────────────────
 def predict_winner(X_input):
+    """Predict winner using 3-model ensemble: 0.5*LGBM + 0.3*XGB + 0.2*LR (v3)
+    Falls back to 2-model ensemble (RF + XGB) if 3-model not available (v2 compatibility)."""
+
     if xgb_model is None:
         return 0.5, 0.5
 
+    # Check if 3-model ensemble (v3) is available
+    if lgbm_model is not None and lr_model is not None:
+        # 3-model weighted ensemble: 0.5*LGBM + 0.3*XGB + 0.2*LR
+        lgbm_prob = lgbm_model.predict_proba(X_input)[0][1]
+        xgb_prob = xgb_model.predict_proba(X_input)[0][1]
+        lr_prob = lr_model.predict_proba(X_input)[0][1]
+
+        prob_t1 = 0.5 * lgbm_prob + 0.3 * xgb_prob + 0.2 * lr_prob
+        return round(prob_t1, 4), round(1 - prob_t1, 4)
+
+    # Fallback: use XGB only or 2-model ensemble (v2 compatibility)
     xgb_prob = xgb_model.predict_proba(X_input)[0][1]
 
+    # rf_model is available only in v2 models (RF was removed in v3 in favor of LGBM)
+    # Check if we have old RF model from dashboard load_models return
+    # (In v2 compatibility mode, this would be set)
     if rf_model is not None:
         rf_prob = rf_model.predict_proba(X_input)[0][1]
         prob_t1 = (xgb_prob + rf_prob) / 2
@@ -579,11 +760,18 @@ def render_live_panel(team1_name, team2_name, all_teams: list, all_venues: list)
     # ── Cricdata fields ───────────────────────────────────────────────────────
     if live:
         col1, col2, col3 = st.columns(3)
+        
+        # Normalize venue for display
+        raw_venue = live.get("venue") or "—"
+        display_venue = normalize_venue_to_dataset(str(raw_venue), all_venues) if raw_venue != "—" else "—"
+        # Format venue name nicely (title case)
+        if display_venue and display_venue != "—":
+            display_venue = display_venue.title().replace("Ma ", "MA ").replace(" Of ", " of ")
 
         with col1:
             st.markdown("**📍 Match (IPL)**")
             st.write("**Name:** " + str(live.get("match_name") or "—"))
-            st.write("**Venue:** " + str(live.get("venue") or "—"))
+            st.write("**Venue:** " + display_venue)
             st.write("**Date:** " + str(live.get("match_date") or "—"))
             st.write("**League:** " + str(live.get("league") or "IPL"))
             st.write("**Status:** " + str(live.get("match_status") or "—"))

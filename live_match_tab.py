@@ -193,6 +193,7 @@ def predict_phase_runs(
         "batting_strength"     : batting_strength,
         "venue_avg_phase_runs" : venue_avg_phase,
         "venue_avg_total"      : venue_avg_total,
+        "season_recency"       : 1.0,  # Current season (2026) → recency = 1.0
     }])
 
     remaining_pred = max(0.0, float(model.predict(feat)[0]))

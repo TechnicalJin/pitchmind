@@ -377,3 +377,4 @@ def list_blank_template(match_id: str = "") -> dict:
         "last_updated": "",
         "data_source": "cricdata",
     }
+
