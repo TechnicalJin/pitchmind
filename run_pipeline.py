@@ -1,10 +1,10 @@
 import os
 
 scripts = [
+     "download_cricsheet_ipl.py",   # 🔥 NEW STEP
     "0_json_to_csv.py",
     "1_data_cleaning.py",
     "2_feature_engineering.py",
-    "3_train_model.py",
     "5_live_data_fetch.py",
     "6_player_features.py",
     "7_phase_predictor.py",
