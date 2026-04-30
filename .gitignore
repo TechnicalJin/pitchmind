@@ -1,20 +1,64 @@
-# Virtual Environment
+# ================================
+# 🔹 Virtual Environment
+# ================================
 venv/
+.env/
 
-# Python cache
+# ================================
+# 🔹 Python Cache
+# ================================
 __pycache__/
 *.pyc
+*.pyo
 
-# Data files
-data/
-data_IPL/
-models/
+# ================================
+# 🔹 Ignore ALL data & models by default
+# ================================
+data/*
+data_IPL/*
+models/*
 *.csv
 *.json
 
-# OS files
+# ================================
+# ✅ Allow REQUIRED runtime files
+# ================================
+
+# --- Core dashboard files ---
+!master_features.csv
+
+# --- Models (Match Predictor) ---
+!models/ipl_model.pkl
+!models/ipl_model_rf.pkl
+!models/feature_cols.pkl
+
+# --- Player Scout ---
+!deliveries_clean.csv
+!deliveries.csv
+!matches_clean.csv
+!matches.csv
+
+# --- Live Match Models (optional but recommended) ---
+!phase_powerplay_model.pkl
+!phase_middle_model.pkl
+!phase_death_model.pkl
+!phase_batter_sr.pkl
+!phase_bowler_eco.pkl
+!phase_venue_factor.pkl
+!phase_feature_cols.pkl
+
+# --- Live / Cache files (optional) ---
+!data/live/todays_match.json
+!ipl_2026_matches.json
+!name_map.json
+
+# ================================
+# 🔹 OS files
+# ================================
 .DS_Store
 Thumbs.db
 
-# Logs
+# ================================
+# 🔹 Logs
+# ================================
 *.log

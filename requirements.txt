@@ -1,0 +1,16 @@
+# PitchMind project requirements
+# Core data and ML stack
+numpy
+pandas
+scikit-learn
+joblib
+xgboost
+optuna
+matplotlib
+shap
+
+# App and live-data stack
+streamlit
+flask
+requests
+rapidfuzz
