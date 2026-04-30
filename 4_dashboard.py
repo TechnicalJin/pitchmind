@@ -56,7 +56,7 @@ except ImportError:
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
     try:
-        from six_player_features import (
+        from pitchmind_player_features import (
             load_deliveries  as _load_deliveries,
             load_matches     as _load_matches,
             get_all_player_stats,
@@ -208,17 +208,19 @@ xgb_model, rf_model, feature_cols, shap_explainer = load_models()
 def load_player_data():
     """Load deliveries + batting/bowling stats via Group-3 cache (one-shot compute)."""
     if not PLAYER_MODULE_OK:
-        return None, None, None, None
+        return None, None, None, None, {}, {}
     del_df     = _load_deliveries()
     matches_df = _load_matches()
     if del_df is None:
-        return None, None, None, None
+        return None, None, None, None, {}, {}
     # get_all_player_stats computes once and caches at module level (Group 3 fix)
     bat_df, bowl_df = get_all_player_stats(del_df, matches_df)
-    return del_df, bat_df, bowl_df, matches_df
+    bat_lookup = bat_df.set_index("player").to_dict("index") if bat_df is not None and len(bat_df) > 0 else {}
+    bowl_lookup = bowl_df.set_index("player").to_dict("index") if bowl_df is not None and len(bowl_df) > 0 else {}
+    return del_df, bat_df, bowl_df, matches_df, bat_lookup, bowl_lookup
 
 
-del_df, bat_df, bowl_df, matches_df = load_player_data()
+del_df, bat_df, bowl_df, matches_df, bat_lookup, bowl_lookup = load_player_data()
 
 
 # ── HELPER: get team stats from dataset ───────────────────────────────────────
@@ -400,23 +402,290 @@ def build_feature_vector(team1, team2, venue, toss_winner, toss_decision, df, fe
         "diff_squad_bat_sr":     s1["squad_bat_sr"]    - s2["squad_bat_sr"],
     }
 
-    return pd.DataFrame([feat])[feature_cols], s1, s2, h2h, venue_avg
+    feat_df = pd.DataFrame([feat])
+
+    # Backward/forward compatibility: some trained models expect extra columns
+    # that may not be explicitly built above in older dashboard versions.
+    optional_defaults = {
+        "season_recency": 1.0,
+        "season_avg_runs": venue_avg,
+        "team1_form_velocity": 0.0,
+        "team2_form_velocity": 0.0,
+        "diff_form_velocity": 0.0,
+        "impact_player_era": 0.0,
+        "team1_relative_score": s1["win_rate"],
+        "team2_relative_score": s2["win_rate"],
+        "diff_relative_score": s1["win_rate"] - s2["win_rate"],
+        "team1_relative_rr": s1["run_rate"],
+        "team2_relative_rr": s2["run_rate"],
+    }
+    for col, default_val in optional_defaults.items():
+        if col not in feat_df.columns:
+            feat_df[col] = default_val
+
+    missing_cols = [col for col in feature_cols if col not in feat_df.columns]
+    for col in missing_cols:
+        feat_df[col] = 0.0
+
+    return feat_df[feature_cols], s1, s2, h2h, venue_avg
+
+
+# ── XI PREDICTOR ──────────────────────────────────────────────────────────────
+try:
+    from xi_predictor import compute_xi_adjustment, get_xi_feature_summary, clip_prob
+    XI_PREDICTOR_OK = True
+except ImportError:
+    XI_PREDICTOR_OK = False
+
+    def compute_xi_adjustment(*a, **kw):
+        return 0.0, {"note": "xi_predictor not installed"}
+
+    def get_xi_feature_summary(*a, **kw):
+        return {}
+
+    def clip_prob(p):
+        return max(0.05, min(0.95, p))
 
 
 # ── PREDICT ───────────────────────────────────────────────────────────────────
+
 def predict_winner(X_input):
+    """
+    UNCHANGED from original — returns base probability from model ensemble.
+    XI adjustment is applied separately in the UI layer.
+    """
     if xgb_model is None:
         return 0.5, 0.5
-
+ 
     xgb_prob = xgb_model.predict_proba(X_input)[0][1]
-
+ 
     if rf_model is not None:
         rf_prob = rf_model.predict_proba(X_input)[0][1]
         prob_t1 = (xgb_prob + rf_prob) / 2
     else:
         prob_t1 = xgb_prob
-
+ 
     return round(prob_t1, 4), round(1 - prob_t1, 4)
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEW FUNCTION — add to 4_dashboard.py
+# Computes XI-adjusted probability (call after predict_winner)
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def predict_winner_with_xi(X_input, team1_xi, team2_xi, bat_df, bowl_df):
+    """
+    Returns (base_prob_t1, adjusted_prob_t1, xi_debug, xi_summary)
+ 
+    - base_prob_t1:     raw model prediction (team history only)
+    - adjusted_prob_t1: after applying XI quality adjustment
+    - xi_debug:         dict with adjustment breakdown for display
+    - xi_summary:       dict with squad metrics for display table
+    """
+    base_t1, base_t2 = predict_winner(X_input)
+ 
+    if not XI_PREDICTOR_OK or (not team1_xi and not team2_xi):
+        return base_t1, base_t1, {"note": "No XI provided"}, {}
+ 
+    xi_adj, xi_debug = compute_xi_adjustment(
+        team1_xi, team2_xi,
+        bat_df, bowl_df,
+    )
+ 
+    adjusted_t1 = clip_prob(base_t1 + xi_adj)
+ 
+    xi_summary = get_xi_feature_summary(
+        team1_xi, team2_xi, bat_df, bowl_df,
+    )
+ 
+    return base_t1, adjusted_t1, xi_debug, xi_summary
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REPLACEMENT SECTION for the Match Predictor tab
+# Replace everything between "# ── WIN PROBABILITY" and "# ── SHAP"
+# in the elif page == "🎯 Match Predictor": block
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+MATCH_PREDICTOR_XI_SECTION = '''
+    # ── PLAYING XI INPUT (at top of predictor) ───────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🏏 Playing XIs")
+    st.caption(
+        "Enter the playing 11 for each team. "
+        "Player names should match how they appear in the data "
+        "(e.g. 'V Kohli', 'JJ Bumrah') — or use full names if name_resolver is enabled. "
+        "**This will directly adjust the win probability prediction.**"
+    )
+ 
+    # Load XIs from live data if available (auto-fill)
+    _live_data = load_live_match() or {}
+    _xi1_from_live = _live_data.get("team1_xi", [])
+    _xi2_from_live = _live_data.get("team2_xi", [])
+ 
+    xi_c1, xi_c2 = st.columns(2)
+    with xi_c1:
+        xi1_raw = st.text_area(
+            f"🔵 {team1} Playing XI",
+            value="\\n".join(_xi1_from_live) if _xi1_from_live else "",
+            height=220,
+            key="predict_xi1",
+            placeholder="One player per line\\ne.g.\\nRohit Sharma\\nShubman Gill\\n...",
+            help="Names auto-loaded from Live Match fetch. Edit manually if needed.",
+        )
+    with xi_c2:
+        xi2_raw = st.text_area(
+            f"🔴 {team2} Playing XI",
+            value="\\n".join(_xi2_from_live) if _xi2_from_live else "",
+            height=220,
+            key="predict_xi2",
+            placeholder="One player per line\\ne.g.\\nMS Dhoni\\nRA Jadeja\\n...",
+            help="Names auto-loaded from Live Match fetch. Edit manually if needed.",
+        )
+ 
+    team1_xi = [p.strip() for p in xi1_raw.strip().splitlines() if p.strip()]
+    team2_xi = [p.strip() for p in xi2_raw.strip().splitlines() if p.strip()]
+ 
+    # ── BUILD PREDICTION ─────────────────────────────────────────────────────
+    if feature_cols is not None:
+        X_input, s1, s2, h2h, venue_avg = build_feature_vector(
+            team1, team2, venue, toss_winner, toss_decision, df, feature_cols
+        )
+        base_t1, adjusted_t1, xi_debug, xi_summary = predict_winner_with_xi(
+            X_input, team1_xi, team2_xi, bat_df, bowl_df
+        )
+        prob_t1 = adjusted_t1
+        prob_t2 = round(1.0 - prob_t1, 4)
+    else:
+        prob_t1, prob_t2 = 0.5, 0.5
+        base_t1 = 0.5
+        xi_debug = {}
+        xi_summary = {}
+        s1 = get_team_stats(team1, "team1", venue, df)
+        s2 = get_team_stats(team2, "team2", venue, df)
+        h2h = 0.5
+        venue_avg = 160.0
+ 
+    winner_label = team1 if prob_t1 >= 0.5 else team2
+    winner_prob  = max(prob_t1, prob_t2)
+ 
+    # ── WIN PROBABILITY ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(\'<div class="section-header">🎯 Win Probability</div>\', unsafe_allow_html=True)
+ 
+    col1, col2, col3 = st.columns([5, 2, 5])
+    with col1:
+        st.markdown(
+            \'<div class="win-box-blue">\'
+            \'<h2 style="margin:0; font-size:1.3rem">\' + team1 + \'</h2>\'
+            \'<h1 style="font-size:3.8rem; margin:10px 0">\' + f"{prob_t1:.0%}" + \'</h1>\'
+            \'<p style="margin:0; opacity:0.8">Win Probability</p>\'
+            \'</div>\',
+            unsafe_allow_html=True
+        )
+    with col2:
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
+        st.markdown("<h2 style=\'text-align:center; color:#ffa726\'>VS</h2>", unsafe_allow_html=True)
+    with col3:
+        st.markdown(
+            \'<div class="win-box-red">\'
+            \'<h2 style="margin:0; font-size:1.3rem">\' + team2 + \'</h2>\'
+            \'<h1 style="font-size:3.8rem; margin:10px 0">\' + f"{prob_t2:.0%}" + \'</h1>\'
+            \'<p style="margin:0; opacity:0.8">Win Probability</p>\'
+            \'</div>\',
+            unsafe_allow_html=True
+        )
+ 
+    # Probability bar
+    st.markdown("<br>", unsafe_allow_html=True)
+    fig, ax = plt.subplots(figsize=(10, 0.7))
+    fig.patch.set_facecolor("#0f1117")
+    ax.set_facecolor("#0f1117")
+    ax.barh(0, prob_t1, color="#1976d2", height=0.6)
+    ax.barh(0, prob_t2, left=prob_t1, color="#e53935", height=0.6)
+    ax.text(prob_t1/2,           0, f"{prob_t1:.0%}", ha="center", va="center", color="white", fontweight="bold", fontsize=12)
+    ax.text(prob_t1 + prob_t2/2, 0, f"{prob_t2:.0%}", ha="center", va="center", color="white", fontweight="bold", fontsize=12)
+    ax.set_xlim(0, 1); ax.axis("off")
+    plt.tight_layout(pad=0)
+    st.pyplot(fig, width="stretch")
+    plt.close()
+ 
+    st.success("🏆 **Predicted Winner: " + winner_label + "** with **" + f"{winner_prob:.0%}" + "** confidence")
+ 
+    # ── XI ADJUSTMENT BREAKDOWN ───────────────────────────────────────────────
+    xi_adj_val = xi_debug.get("final_adjustment", 0.0)
+    if team1_xi or team2_xi:
+        st.markdown("---")
+        st.markdown(\'<div class="section-header">🏏 Playing XI Impact</div>\', unsafe_allow_html=True)
+ 
+        adj_col1, adj_col2, adj_col3 = st.columns(3)
+        with adj_col1:
+            st.metric("Base Prediction (Team History)",  f"{base_t1:.1%}", help="Model prediction using team rolling stats only")
+        with adj_col2:
+            delta_str = f"{xi_adj_val:+.1%}" if xi_adj_val != 0 else "0.0%"
+            delta_color = "normal"
+            st.metric("XI Quality Adjustment", delta_str,
+                      help="How much the actual XI quality shifts the base prediction")
+        with adj_col3:
+            st.metric("Final Prediction (XI-adjusted)", f"{prob_t1:.1%}",
+                      help="Base prediction + XI adjustment")
+ 
+        if xi_debug.get("note"):
+            note = xi_debug["note"]
+            if "found" in note.lower():
+                found_t1 = xi_debug.get("t1_players_found", 0)
+                found_t2 = xi_debug.get("t2_players_found", 0)
+                xi_size  = max(len(team1_xi), len(team2_xi))
+                if min(found_t1, found_t2) < xi_size * 0.5:
+                    st.warning(
+                        f"⚠️ **Low player recognition:** {found_t1}/{len(team1_xi)} {team1} players, "
+                        f"{found_t2}/{len(team2_xi)} {team2} players found in database.\\n\\n"
+                        f"Use Cricsheet-style names (e.g. 'V Kohli', 'JJ Bumrah') or "
+                        f"full names if name_resolver is enabled."
+                    )
+                else:
+                    st.info(f"ℹ️ {note}")
+ 
+        # Squad comparison table from XI
+        if xi_summary and xi_summary.get("metrics"):
+            st.markdown("**XI Squad Comparison**")
+            metrics_data = []
+            for m in xi_summary["metrics"]:
+                t1_val = m["team1"]
+                t2_val = m["team2"]
+                better = m["better"]
+                t1_str = f"✅ {t1_val}" if better == "team1" else str(t1_val)
+                t2_str = f"✅ {t2_val}" if better == "team2" else str(t2_val)
+                metrics_data.append({
+                    "Metric" : m["label"],
+                    team1    : t1_str,
+                    team2    : t2_str,
+                })
+            st.dataframe(pd.DataFrame(metrics_data).set_index("Metric"), width="stretch")
+ 
+        # Debug expander
+        with st.expander("🔬 XI Adjustment Details"):
+            st.markdown(f"""
+| Metric | Value |
+|--------|-------|
+| Batting Advantage (T1−T2) | {xi_debug.get("bat_advantage", 0):.4f} |
+| Bowling Advantage (T1−T2) | {xi_debug.get("bowl_advantage", 0):.4f} |
+| T1 Squad SR vs T2 Squad SR | {xi_debug.get("t1_squad_avg_sr","—")} vs {xi_debug.get("t2_squad_avg_sr","—")} |
+| T1 Economy vs T2 Economy | {xi_debug.get("t1_squad_avg_eco","—")} vs {xi_debug.get("t2_squad_avg_eco","—")} |
+| T1 Death SR vs T2 Death SR | {xi_debug.get("t1_squad_death_sr","—")} vs {xi_debug.get("t2_squad_death_sr","—")} |
+| T1 Death Eco vs T2 Death Eco | {xi_debug.get("t1_squad_death_eco","—")} vs {xi_debug.get("t2_squad_death_eco","—")} |
+| Raw Adjustment | {xi_debug.get("raw_adjustment", 0):.4f} |
+| Final Adjustment | {xi_adj_val:+.4f} (capped at ±8%) |
+            """)
+ 
+    elif not team1_xi and not team2_xi:
+        st.info(
+            "💡 **Enter Playing XIs above** to see how the actual squads affect the win probability. "
+            "XIs are auto-loaded from Live Match fetch when available."
+        )
+'''    
 
 
 # ── LIVE DATA HELPERS ─────────────────────────────────────────────────────────
@@ -886,136 +1155,225 @@ def _render_player_scout(team1_name, team2_name):
             "Make sure `deliveries_clean.csv` exists in `data/` directory.\n\n"
             "Run: `python 1_data_cleaning.py` then `python 6_player_features.py`"
         )
+        # DEBUG — remove after fixing name mismatches
+        with st.expander("🔧 Debug: Name resolution check"):
+            live_check = load_live_match() or {}
+            xi_check = (live_check.get("team1_xi", []) or []) + (live_check.get("team2_xi", []) or [])
+            if xi_check:
+                debug_rows = []
+                for p in xi_check:
+                    in_bat = p in (bat_lookup or {})
+                    in_bowl = p in (bowl_lookup or {})
+                    resolved = resolve_name(p) if NAME_RESOLVER_OK else None
+                    res_in_bat = resolved in (bat_lookup or {}) if resolved else False
+                    res_in_bowl = resolved in (bowl_lookup or {}) if resolved else False
+                    debug_rows.append({
+                        "XI Name": p,
+                        "In bat_lookup": "✅" if in_bat else "❌",
+                        "In bowl_lookup": "✅" if in_bowl else "❌",
+                        "Resolved to": resolved or "—",
+                        "Resolved bat": "✅" if res_in_bat else "❌",
+                        "Resolved bowl": "✅" if res_in_bowl else "❌",
+                    })
+                st.dataframe(pd.DataFrame(debug_rows), width="stretch", hide_index=True)
+                st.caption("Sample bat_lookup keys: " + str(list((bat_lookup or {}).keys())[:10]))
         return
-
-    bat_lookup  = bat_df.set_index("player").to_dict("index")  if len(bat_df) > 0 else {}
-    bowl_lookup = bowl_df.set_index("player").to_dict("index") if len(bowl_df) > 0 else {}
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["📋 Squad Comparison", "🔎 Player Search", "⚔️ Head to Head"])
+
+    # ── DROP-IN REPLACEMENT for the helper inside _render_player_scout ───────────
+    def get_resolved_stats_FIXED(player_name: str, lookup_dict: dict):
+        """
+        Resolve player name to cricsheet key and look up in the given dict.
+
+        Resolution order (handled by name_resolver v4):
+          1. Exact match in deliveries
+          2. FULL_TO_CRICSHEET manual map  (e.g. "Virat Kohli" -> "V Kohli")
+          3. Surname + initial heuristic
+          4. Fuzzy match
+          5. None
+
+        Returns (stats_dict, resolved_name_or_None)
+        """
+        # Step 1: exact key already in lookup (fastest path)
+        if player_name in lookup_dict:
+            return lookup_dict[player_name], player_name
+
+        # Step 2: use name_resolver (returns cricsheet key now)
+        if NAME_RESOLVER_OK:
+            resolved = resolve_name(player_name)
+            if resolved:
+                stats = lookup_dict.get(resolved, {})
+                return stats, resolved
+
+        # Step 3: manual abbreviation fallback (no resolver)
+        parts = player_name.strip().split()
+        if len(parts) >= 2:
+            for abbrev in [
+                parts[0][0] + " " + " ".join(parts[1:]),  # "V Kohli"
+                parts[0][0] + " " + parts[-1],             # "V Kohli"
+            ]:
+                if abbrev in lookup_dict:
+                    return lookup_dict[abbrev], abbrev
+
+        return {}, None
 
     # ══════════════════════════════════════════════════════
     # TAB 1: Squad Comparison — side-by-side XIs
     # ══════════════════════════════════════════════════════
     with tab1:
-        # Load playing XIs from live data if available
         live = load_live_match()
         xi1_default = live.get("team1_xi", []) if live else []
         xi2_default = live.get("team2_xi", []) if live else []
 
         st.markdown("**Enter Playing XIs** (one name per line, or auto-loaded from Live Data)")
-
         c1, c2 = st.columns(2)
         with c1:
             xi1_raw = st.text_area(
                 f"🔵 {team1_name} XI",
                 value="\n".join(xi1_default) if xi1_default else "",
-                height=220,
-                key="scout_xi1",
+                height=220, key="scout_xi1",
                 placeholder="e.g.\nRohit Sharma\nV Kohli\n..."
             )
         with c2:
             xi2_raw = st.text_area(
                 f"🔴 {team2_name} XI",
                 value="\n".join(xi2_default) if xi2_default else "",
-                height=220,
-                key="scout_xi2",
-                placeholder="e.g.\nMS Dhoni\nRavindra Jadeja\n..."
+                height=220, key="scout_xi2",
+                placeholder="e.g.\nMS Dhoni\nRA Jadeja\n..."
             )
 
         xi1 = [p.strip() for p in xi1_raw.strip().splitlines() if p.strip()]
         xi2 = [p.strip() for p in xi2_raw.strip().splitlines() if p.strip()]
 
         if not xi1 and not xi2:
-            if NAME_RESOLVER_OK:
-                st.info("👆 Enter player names above to see stats. Names can be in full format (e.g., 'Jasprit Bumrah', 'Virat Kohli') or Cricsheet format (e.g., 'JJ Bumrah', 'V Kohli').")
-            else:
-                st.info("👆 Enter at least one player name above to see stats. Names must match Cricsheet data exactly (e.g. 'V Kohli', 'RG Sharma').")
+            st.info("👆 Enter player names above to see stats.")
             return
 
-        # ── Helper: Resolve name and get stats ──────────────────────────────
-        def get_resolved_stats(player_name, lookup_dict):
-            """Resolve name and lookup stats, with fallback."""
-            if NAME_RESOLVER_OK:
-                resolved = resolve_name(player_name)
-                if resolved:
-                    stats = lookup_dict.get(resolved, {})
-                    return stats, resolved
-                else:
-                    # New player - no history
-                    return {}, None
-            else:
-                return lookup_dict.get(player_name, {}), player_name
+        # ── RESOLVE ALL NAMES ONCE ──────────────────────────────────────────
+        # Build {original_name: cricsheet_key} for both XIs.
+        # Both batting and bowling cards use this same map -> no missed lookups.
+
+        def _build_resolved_map(xi):
+            """
+            Resolve every name in xi to its deliveries/cricsheet key.
+            Tries in order: exact, name_resolver, abbreviation fallback.
+            """
+            result = {}
+            for p in xi:
+                # 1. Already an exact key in either lookup
+                if p in bat_lookup or p in bowl_lookup:
+                    result[p] = p
+                    continue
+
+                # 2. name_resolver v4 (returns cricsheet key)
+                if NAME_RESOLVER_OK:
+                    resolved = resolve_name(p)
+                    if resolved and (resolved in bat_lookup or resolved in bowl_lookup):
+                        result[p] = resolved
+                        continue
+
+                # 3. Manual abbreviation fallback
+                parts = p.strip().split()
+                found = False
+                if len(parts) >= 2:
+                    for abbrev in [
+                        parts[0][0] + " " + " ".join(parts[1:]),
+                        parts[0][0] + " " + parts[-1],
+                    ]:
+                        if abbrev in bat_lookup or abbrev in bowl_lookup:
+                            result[p] = abbrev
+                            found = True
+                            break
+                if not found:
+                    result[p] = p  # keep original - will show "no data" gracefully
+            return result
+
+        xi1_resolved = _build_resolved_map(xi1)
+        xi2_resolved = _build_resolved_map(xi2)
+
+        # ── DEBUG EXPANDER (remove after confirming names work) ─────────────
+        with st.expander("🔧 Name resolution check", expanded=False):
+            debug_rows = []
+            for p in xi1:
+                rk = xi1_resolved.get(p, p)
+                debug_rows.append({
+                    "XI (raw)": p,
+                    "Team": team1_name,
+                    "Resolved key": rk,
+                    "Bat data": "✅" if bat_lookup.get(rk) else "❌",
+                    "Bowl data": "✅" if bowl_lookup.get(rk) else "❌",
+                })
+            for p in xi2:
+                rk = xi2_resolved.get(p, p)
+                debug_rows.append({
+                    "XI (raw)": p,
+                    "Team": team2_name,
+                    "Resolved key": rk,
+                    "Bat data": "✅" if bat_lookup.get(rk) else "❌",
+                    "Bowl data": "✅" if bowl_lookup.get(rk) else "❌",
+                })
+            st.dataframe(pd.DataFrame(debug_rows), width="stretch", hide_index=True)
 
         st.markdown("---")
 
-        # ── Batting Section ──────────────────────────────────────────────────
+        # ── BATTING ──────────────────────────────────────────────────────────
         st.markdown('<div class="section-header">🏏 Batting Stats</div>', unsafe_allow_html=True)
         bc1, bc2 = st.columns(2)
-
         with bc1:
             st.markdown(f"**{team1_name}**")
-            if xi1:
-                for p in xi1:
-                    stats, resolved = get_resolved_stats(p, bat_lookup)
-                    _player_batting_card(p, stats)
-            else:
-                st.caption("No players entered")
-
+            for p in xi1:
+                rname = xi1_resolved.get(p, p)
+                _player_batting_card(p, (bat_lookup or {}).get(rname, {}))
         with bc2:
             st.markdown(f"**{team2_name}**")
-            if xi2:
-                for p in xi2:
-                    stats, resolved = get_resolved_stats(p, bat_lookup)
-                    _player_batting_card(p, stats)
-            else:
-                st.caption("No players entered")
+            for p in xi2:
+                rname = xi2_resolved.get(p, p)
+                _player_batting_card(p, (bat_lookup or {}).get(rname, {}))
 
-        # ── Bowling Section ──────────────────────────────────────────────────
+        # ── BOWLING ─────────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown('<div class="section-header">🎳 Bowling Stats</div>', unsafe_allow_html=True)
         bwc1, bwc2 = st.columns(2)
-
         with bwc1:
             st.markdown(f"**{team1_name}**")
-            if xi1:
-                for p in xi1:
-                    stats, resolved = get_resolved_stats(p, bowl_lookup)
-                    _player_bowling_card(p, stats)
-            else:
-                st.caption("No players entered")
-
+            for p in xi1:
+                rname = xi1_resolved.get(p, p)
+                _player_bowling_card(p, (bowl_lookup or {}).get(rname, {}))
         with bwc2:
             st.markdown(f"**{team2_name}**")
-            if xi2:
-                for p in xi2:
-                    stats, resolved = get_resolved_stats(p, bowl_lookup)
-                    _player_bowling_card(p, stats)
-            else:
-                st.caption("No players entered")
+            for p in xi2:
+                rname = xi2_resolved.get(p, p)
+                _player_bowling_card(p, (bowl_lookup or {}).get(rname, {}))
 
-        # ── Summary Table ────────────────────────────────────────────────────
+        # ── SUMMARY TABLE ─────────────────────────────────────────────────────
         if xi1 or xi2:
             st.markdown("---")
             st.markdown('<div class="section-header">📊 Summary Table</div>', unsafe_allow_html=True)
-
             rows = []
-            for team_name, xi in [(team1_name, xi1), (team2_name, xi2)]:
+            for team_name_col, xi, rmap in [
+                (team1_name, xi1, xi1_resolved),
+                (team2_name, xi2, xi2_resolved)
+            ]:
                 for p in xi:
-                    b, _ = get_resolved_stats(p, bat_lookup)
-                    w, _ = get_resolved_stats(p, bowl_lookup)
+                    rk = rmap.get(p, p)
+                    b  = bat_lookup.get(rk, {})
+                    w  = bowl_lookup.get(rk, {})
                     rows.append({
-                        "Team"   : team_name,
-                        "Player" : p,
-                        "Bat SR" : f"{b.get('strike_rate', 0):.0f}" if b else None,
-                        "Bat Avg": f"{b.get('batting_avg', 0):.1f}" if b else None,
-                        "Runs"   : int(b.get("runs", 0)) if b else None,
-                        "Bowl Eco": f"{w.get('economy', 0):.2f}" if w else None,
-                        "Wkts"   : int(w.get("wickets", 0)) if w else None,
+                        "Team"     : team_name_col,
+                        "Player"   : p,
+                        "Bat SR"   : f"{b.get('strike_rate', 0):.0f}"  if b else "—",
+                        "Bat Avg"  : f"{b.get('batting_avg',  0):.1f}" if b else "—",
+                        "Runs"     : int(b.get("runs", 0))               if b else "—",
+                        "Bowl Eco" : f"{w.get('economy',      0):.2f}" if w else "—",
+                        "Wkts"     : int(w.get("wickets", 0))            if w else "—",
                     })
             if rows:
-                _summary_df = clean_dataframe(pd.DataFrame(rows))
-                st.dataframe(_summary_df, width="stretch", hide_index=True)
+                st.dataframe(
+                    clean_dataframe(pd.DataFrame(rows)),
+                    width="stretch", hide_index=True
+                )
 
     # ══════════════════════════════════════════════════════
     # TAB 2: Player Search

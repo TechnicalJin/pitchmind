@@ -294,10 +294,17 @@ def project_final_score(
 # CRICDATA LIVE (match UUID — same as Match Predictor sidebar)
 # ══════════════════════════════════════════════════════════════════════════════
 try:
-    from cricdata_live import fetch_live_match_for_dashboard, merge_manual_fields
+    from cricdata_live import (
+        fetch_live_match_for_dashboard,
+        merge_manual_fields,
+        load_todays_match,
+        save_todays_match,
+    )
 except ImportError:
     fetch_live_match_for_dashboard = None
     merge_manual_fields = None
+    load_todays_match = None
+    save_todays_match = None
 
 
 def _overs_float_to_over_ball(overs_f: float):
@@ -490,7 +497,7 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
                 st.error("cricdata_live module not available.")
             else:
                 with st.spinner("CricAPI match_info…"):
-                    payload, err = fetch_live_match_for_dashboard(
+                    new_data, err = fetch_live_match_for_dashboard(
                         mid_sidebar,
                         dataset_teams=list(all_teams),
                         dataset_venues=list(all_venues),
@@ -500,19 +507,11 @@ def render_live_match_tab(team1=None, team2=None, venue=None, all_teams=None, al
                     st.error("Fetch failed: " + str(err))
                 else:
                     live_path = os.path.join("data", "live", "todays_match.json")
-                    prev = {}
-                    if os.path.exists(live_path):
-                        try:
-                            with open(live_path, encoding="utf-8") as rf:
-                                prev = json.load(rf)
-                        except Exception:
-                            prev = {}
-                    merged = merge_manual_fields(prev, payload) if merge_manual_fields else payload
-                    os.makedirs(os.path.dirname(live_path), exist_ok=True)
-                    with open(live_path, "w", encoding="utf-8") as wf:
-                        json.dump(merged, wf, indent=2, ensure_ascii=False)
-                    _apply_cricdata_to_session_state(payload)
-                    st.session_state["pending_live_sidebar"] = merged
+                    current = load_todays_match(live_path) or {}
+                    final_data = merge_manual_fields(current, new_data)
+                    save_todays_match(live_path, final_data)
+                    _apply_cricdata_to_session_state(final_data)
+                    st.session_state["pending_live_sidebar"] = final_data
                     st.success("✅ Loaded score & players — also saved to data/live/todays_match.json")
                     st.rerun()
 

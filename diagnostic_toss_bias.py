@@ -134,9 +134,15 @@ def diagnose_toss_bias():
         print("SECTION 3: FEATURES ANALYSIS")
         print("=" * 80)
         
+        toss_col = None
         if 'team1_toss_win' in features.columns:
-            feature_toss_mean = features['team1_toss_win'].mean()
-            print(f"\nteam1_toss_win mean in master_features: {feature_toss_mean:.4f}")
+            toss_col = 'team1_toss_win'
+        elif 'toss_win' in features.columns:
+            toss_col = 'toss_win'
+
+        if toss_col is not None:
+            feature_toss_mean = features[toss_col].mean()
+            print(f"\n{toss_col} mean in master_features: {feature_toss_mean:.4f}")
             
             if feature_toss_mean < 0.45:
                 print(f"❌ BIAS DETECTED: {feature_toss_mean:.2%} (expected ~50%)")
@@ -145,7 +151,7 @@ def diagnose_toss_bias():
             else:
                 print(f"✅ ACCEPTABLE: {feature_toss_mean:.2%}")
         else:
-            print("❌ 'team1_toss_win' column not found in features")
+            print("❌ Neither 'team1_toss_win' nor 'toss_win' found in features")
     
     print("\n" + "=" * 80)
     print("DIAGNOSIS COMPLETE")

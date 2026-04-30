@@ -22,6 +22,7 @@ Then run the rest of the pipeline as normal:
 
 import os
 import json
+import hashlib
 import pandas as pd
 from pathlib import Path
 from utils import normalize_team
@@ -31,6 +32,14 @@ JSON_FOLDER  = os.path.join("data", "Data_Cricsheet")
 OUTPUT_DIR   = "data"
 MATCHES_OUT  = os.path.join(OUTPUT_DIR, "matches.csv")
 DELIVERY_OUT = os.path.join(OUTPUT_DIR, "deliveries.csv")
+
+
+def _assign_balanced_team_order(team_a: str, team_b: str, match_id: str):
+    """Deterministically swap team order for ~50/50 orientation across matches."""
+    hash_byte = hashlib.md5(str(match_id).encode("utf-8")).digest()[0]
+    if hash_byte % 2 == 0:
+        return team_a, team_b
+    return team_b, team_a
 
 
 # ── PARSE ONE JSON FILE ───────────────────────────────────────────────────────
@@ -60,7 +69,7 @@ def parse_match(filepath):
     info = data.get("info", {})
 
     # ── match id: use filename (numeric) ──────────────────────────────────────
-    match_id = Path(filepath).stem
+    match_id = str(Path(filepath).stem)
 
     # ── date & season ─────────────────────────────────────────────────────────
     dates = info.get("dates", [])
@@ -72,8 +81,9 @@ def parse_match(filepath):
     teams = info.get("teams", [])
     if len(teams) < 2:
         return None, []
-    team1 = normalize_team(teams[0])
-    team2 = normalize_team(teams[1])
+    team_a = normalize_team(teams[0])
+    team_b = normalize_team(teams[1])
+    team1, team2 = _assign_balanced_team_order(team_a, team_b, match_id)
 
     # ── venue / city ──────────────────────────────────────────────────────────
     venue = info.get("venue", "Unknown")
@@ -81,7 +91,10 @@ def parse_match(filepath):
 
     # ── toss ──────────────────────────────────────────────────────────────────
     toss         = info.get("toss", {})
-    toss_winner  = normalize_team(toss.get("winner", team1))
+    toss_winner_raw = toss.get("winner")
+    toss_winner  = normalize_team(toss_winner_raw) if isinstance(toss_winner_raw, str) else None
+    if toss_winner not in {team1, team2}:
+        toss_winner = None
     toss_decision = toss.get("decision", "bat")
 
     # ── outcome ───────────────────────────────────────────────────────────────
@@ -143,8 +156,13 @@ def parse_match(filepath):
             break
 
         batting_team = normalize_team(inning.get("team", ""))
-        # bowling team = the other team
-        bowling_team = team2 if batting_team == team1 else team1
+        # bowling team = the other team, with a safe fallback for malformed innings team names
+        if batting_team == team1:
+            bowling_team = team2
+        elif batting_team == team2:
+            bowling_team = team1
+        else:
+            bowling_team = team2 if inning_idx == 1 else team1
 
         for over_obj in inning.get("overs", []):
             over_no = over_obj.get("over", 0)

@@ -1,744 +1,713 @@
 """
-PITCHMIND — PLAYER NAME RESOLUTION SYSTEM
-==========================================
-Resolves player name mismatches between:
-- Squad data (full names): "Jasprit Bumrah", "Virat Kohli"
-- Cricsheet data (initials): "JJ Bumrah", "V Kohli"
+PITCHMIND — PLAYER NAME RESOLUTION SYSTEM  (v4 — Deliveries-First)
+====================================================================
+Key change vs v3:
+  - resolve_name() NOW RETURNS the CRICSHEET name (as stored in deliveries_clean.csv)
+    not the full squad name. This is what bat_lookup / bowl_lookup keys use.
+  - v3 was returning "Virat Kohli" but the lookup needed "V Kohli" → always missed.
+  - The deliveries CSV is the single source of truth for player keys.
+  - Squad JSON is used only to confirm a player is in 2026 squads.
+  - Auto-generates full bidirectional map from deliveries data on first run.
+  - Saves to data/name_map.json for instant reuse.
+
+Resolution order for any input name:
+  1. Exact match in deliveries (already a cricsheet name) → return as-is
+  2. name_map.json cache
+  3. FULL_TO_CRICSHEET manual map  (e.g. "Virat Kohli" → "V Kohli")
+  4. CRICSHEET_TO_CRICSHEET aliases (e.g. "jj bumrah" → "JJ Bumrah")
+  5. Surname + initial heuristic   (e.g. "Jasprit Bumrah" → "JJ Bumrah")
+  6. Fuzzy match against deliveries players
+  7. None
 
 Usage:
-    from name_resolver import resolve_name, get_cricsheet_name, build_name_mapping
+    from name_resolver import resolve_name, get_team_squad
 
-    # Resolve a squad name to cricsheet name
-    cricsheet_name = resolve_name("Jasprit Bumrah")  # -> "JJ Bumrah"
-
-    # Or use the lookup directly
-    cricsheet_name = get_cricsheet_name("Virat Kohli")  # -> "V Kohli"
+    resolve_name("V Kohli")        # → "V Kohli"   (already cricsheet)
+    resolve_name("Virat Kohli")    # → "V Kohli"   (full → cricsheet)
+    resolve_name("Jasprit Bumrah") # → "JJ Bumrah" (full → cricsheet)
+    resolve_name("jj bumrah")      # → "JJ Bumrah" (case fix)
 """
 
 import os
 import json
 import re
 import pandas as pd
-from typing import Optional, Dict, Tuple, Set, List
+from typing import Optional, Dict, Set, List, Tuple
+
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+DATA_DIR         = "data"
+SQUADS_JSON_PATH = os.path.join("Squad_Data", "ipl_2026_team_squads.json")
+NAME_MAP_PATH    = os.path.join(DATA_DIR, "name_map.json")
+FUZZY_THRESHOLD  = 80
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION
+# FULL NAME → CRICSHEET NAME  (manually verified, covers all 2026 squads)
+# Key   = any input format (full name, CricAPI name, broadcast name)
+# Value = exact key as it appears in deliveries_clean.csv
 # ══════════════════════════════════════════════════════════════════════════════
+FULL_TO_CRICSHEET: Dict[str, str] = {
 
-DATA_DIR = "data"
-NAME_MAP_PATH = os.path.join(DATA_DIR, "name_map.json")
-MASTER_PLAYERS_PATH = os.path.join(DATA_DIR, "master_players.csv")
+    # ── Mumbai Indians ────────────────────────────────────────────────────────
+    "Jasprit Bumrah"       : "JJ Bumrah",
+    "Rohit Sharma"         : "RG Sharma",
+    "Hardik Pandya"        : "HH Pandya",
+    "Suryakumar Yadav"     : "SA Yadav",
+    "Tilak Varma"          : "Tilak Varma",
+    "Tim David"            : "TH David",
+    "Quinton de Kock"      : "Q de Kock",
+    "Trent Boult"          : "TA Boult",
+    "Mitchell Santner"     : "MJ Santner",
+    "Will Jacks"           : "WG Jacks",
+    "Deepak Chahar"        : "DL Chahar",
+    "Shardul Thakur"       : "SN Thakur",
+    "Naman Dhir"           : "Naman Dhir",
+    "Ryan Rickelton"       : "RD Rickelton",
+    "Reece Topley"         : "RJW Topley",
 
-# Fuzzy matching threshold (0-100)
-FUZZY_THRESHOLD = 85
+    # ── Chennai Super Kings ───────────────────────────────────────────────────
+    "MS Dhoni"             : "MS Dhoni",
+    "Ruturaj Gaikwad"      : "RD Gaikwad",
+    "Shivam Dube"          : "S Dube",
+    "Matthew Short"        : "MW Short",
+    "Noor Ahmad"           : "Noor Ahmad",
+    "Khaleel Ahmed"        : "KK Ahmed",
+    "Rahul Chahar"         : "RD Chahar",
+    "Devon Conway"         : "DP Conway",
+    "Ravindra Jadeja"      : "RA Jadeja",
+    "Ambati Rayudu"        : "AT Rayudu",
+    "Moeen Ali"            : "MM Ali",
+    "Rachin Ravindra"      : "R Ravindra",
+    "Shaik Rasheed"        : "SK Rasheed",
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MANUAL NAME MAPPING (CRITICAL — known initials to full names)
-# ══════════════════════════════════════════════════════════════════════════════
+    # ── Royal Challengers Bengaluru ───────────────────────────────────────────
+    "Virat Kohli"          : "V Kohli",
+    "Josh Hazlewood"       : "JR Hazlewood",
+    "Krunal Pandya"        : "KH Pandya",
+    "Bhuvneshwar Kumar"    : "B Kumar",
+    "Jacob Bethell"        : "JG Bethell",
+    "Phil Salt"            : "PD Salt",
+    "Romario Shepherd"     : "R Shepherd",
+    "Yash Dayal"           : "Yash Dayal",
+    "Venkatesh Iyer"       : "VR Iyer",
+    "Vicky Ostwal"         : "VC Ostwal",
+    "Devdutt Padikkal"     : "D Padikkal",
+    "Rajat Patidar"        : "RM Patidar",
+    "Suyash Sharma"        : "Suyash Sharma",
+    "Jitesh Sharma"        : "JM Sharma",
+    "Rasikh Dar"           : "Rasikh Salam",
+    "Rasikh Salam Dar"     : "Rasikh Salam",
+    "Tim Seifert"          : "TL Seifert",
+    "Swapnil Singh"        : "Swapnil Singh",
+    "Abhinandan Singh"     : "Abhinandan Singh",
 
-# Format: "normalized_cricsheet_name" -> "normalized_full_name"
-# This handles the JJ Bumrah -> Jasprit Bumrah type conversions
-MANUAL_CRICSHEET_TO_FULL = {
-    # Top Stars - Mumbai Indians
-    "jj bumrah": "jasprit bumrah",
-    "rg sharma": "rohit sharma",
-    "hh pandya": "hardik pandya",
-    "sk yadav": "suryakumar yadav",
-    "sa yadav": "suryakumar yadav",
-    "ty david": "tim david",
-    "qj de kock": "quinton de kock",
-    "q de kock": "quinton de kock",
+    # ── Kolkata Knight Riders ─────────────────────────────────────────────────
+    "Ajinkya Rahane"       : "AM Rahane",
+    "Sunil Narine"         : "SP Narine",
+    "Rinku Singh"          : "RK Singh",
+    "Varun Chakravarthy"   : "CV Varun",
+    "Matheesha Pathirana"  : "M Pathirana",
+    "Angkrish Raghuvanshi" : "A Raghuvanshi",
+    "Manish Pandey"        : "MK Pandey",
+    "Finn Allen"           : "FH Allen",
+    "Rovman Powell"        : "R Powell",
+    "Mitchell Starc"       : "MA Starc",
+    "Cameron Green"        : "C Green",
+    "Harshit Rana"         : "Harshit Rana",
+    "Umran Malik"          : "Umran Malik",
+    "Anrich Nortje"        : "A Nortje",
+    "Lhuan-dre Pretorius"  : "LG Pretorius",
+    "Kwena Maphaka"        : "KT Maphaka",
 
-    # CSK
-    "ms dhoni": "ms dhoni",  # exact match preserved
-    "n jagadeesan": "narayan jagadeesan",
-    "ra jadeja": "ravindra jadeja",
-    "dj bravo": "dwayne bravo",
-    "sm curran": "sam curran",
-    "dp conway": "devon conway",
-    "rn gaikwad": "ruturaj gaikwad",
-    "sd dube": "shivam dube",
-    "m theekshana": "maheesh theekshana",
-    "ts deshpande": "tushar deshpande",
+    # ── Sunrisers Hyderabad ───────────────────────────────────────────────────
+    "Travis Head"          : "TM Head",
+    "Pat Cummins"          : "PJ Cummins",
+    "Heinrich Klaasen"     : "H Klaasen",
+    "Ishan Kishan"         : "Ishan Kishan",
+    "Nitish Kumar Reddy"   : "Nithish Kumar Reddy",
+    "Abhishek Sharma"      : "Abhishek Sharma",
+    "Brydon Carse"         : "BM Carse",
+    "Harshal Patel"        : "HV Patel",
+    "Liam Livingstone"     : "LS Livingstone",
+    "Kamindu Mendis"       : "PHKD Mendis",
+    "Zeeshan Ansari"       : "Zeeshan Ansari",
+    "Simarjeet Singh"      : "Simarjeet Singh",
+    "Atharva Taide"        : "Atharva Taide",
+    "Mohammed Shami"       : "Mohammed Shami",
 
-    # RCB
-    "v kohli": "virat kohli",
-    "kh pandya": "krunal pandya",
-    "fa allen": "finn allen",
-    "rjw topley": "reece topley",
-    "mw short": "matthew short",
-    "hv patel": "harshal patel",
-    "mk lomror": "mahipal lomror",
-    "ss iyer": "shreyas iyer",
-    "kd karthik": "dinesh karthik",
-    "pw hasaranga": "wanindu hasaranga",
-    "jr hazlewood": "josh hazlewood",
-    "js sidhu": "jitesh sharma",
+    # ── Delhi Capitals ────────────────────────────────────────────────────────
+    "Axar Patel"           : "AR Patel",
+    "KL Rahul"             : "KL Rahul",
+    "Kuldeep Yadav"        : "K Yadav",
+    "Lungi Ngidi"          : "L Ngidi",
+    "Karun Nair"           : "KK Nair",
+    "Nitish Rana"          : "N Rana",
+    "Prithvi Shaw"         : "PP Shaw",
+    "Tristan Stubbs"       : "T Stubbs",
+    "Ben Duckett"          : "BA Duckett",
+    "David Miller"         : "DA Miller",
+    "Kyle Jamieson"        : "KA Jamieson",
+    "T Natarajan"          : "T Natarajan",
+    "Faf du Plessis"       : "F du Plessis",
+    "Jake Fraser-McGurk"   : "J Fraser-McGurk",
+    "Mohit Rathee"         : "Mohit Rathee",
+    "Ashutosh Sharma"      : "Ashutosh Sharma",
+    "Sameer Rizvi"         : "Sameer Rizvi",
+    "Abishek Porel"        : "Abishek Porel",
+    "Daryl Mitchell"       : "DJ Mitchell",
 
-    # KKR
-    "am rahane": "ajinkya rahane",
-    "sp narine": "sunil narine",
-    "ad russell": "andre russell",
-    "jj roy": "jason roy",
-    "ss iyer": "shreyas iyer",
-    "vr iyer": "venkatesh iyer",
-    "n rana": "nitish rana",
-    "r singh": "rinku singh",
-    "t seifert": "tim seifert",
-    "lh ferguson": "lockie ferguson",
-    "um malik": "umran malik",
-    "cv varun": "varun chakravarthy",
-    "m pathirana": "matheesha pathirana",
+    # ── Punjab Kings ─────────────────────────────────────────────────────────
+    "Shreyas Iyer"         : "SS Iyer",
+    "Arshdeep Singh"       : "Arshdeep Singh",
+    "Yuzvendra Chahal"     : "YS Chahal",
+    "Marco Jansen"         : "M Jansen",
+    "Marcus Stoinis"       : "MP Stoinis",
+    "Lockie Ferguson"      : "LH Ferguson",
+    "Kagiso Rabada"        : "K Rabada",
+    "Priyansh Arya"        : "Priyansh Arya",
+    "Musheer Khan"         : "Musheer Khan",
+    "Shashank Singh"       : "Shashank Singh",
+    "Prabhsimran Singh"    : "P Simran Singh",
+    "Glenn Maxwell"        : "GJ Maxwell",
+    "Rilee Rossouw"        : "RR Rossouw",
+    "Harnoor Brar"         : "Harpreet Brar",
+    "Harpreet Brar"        : "Harpreet Brar",
+    "Vishwanath Vyshak"    : "Vijaykumar Vyshak",
 
-    # SRH
-    "tw head": "travis head",
-    "hc brook": "harry brook",
-    "ag patel": "axar patel",
-    "b cummins": "pat cummins",
-    "pj cummins": "pat cummins",
-    "t natarajan": "t natarajan",
-    "nk reddy": "nitish kumar reddy",
-    "h klaasen": "heinrich klaasen",
-    "i kishan": "ishan kishan",
+    # ── Gujarat Titans ────────────────────────────────────────────────────────
+    "Shubman Gill"         : "Shubman Gill",
+    "Jos Buttler"          : "JC Buttler",
+    "Rahul Tewatia"        : "R Tewatia",
+    "Rashid Khan"          : "Rashid Khan",
+    "Washington Sundar"    : "Washington Sundar",
+    "Mohammed Siraj"       : "Mohammed Siraj",
+    "Prasidh Krishna"      : "M Prasidh Krishna",
+    "Glenn Phillips"       : "GD Phillips",
+    "Jason Holder"         : "JO Holder",
+    "Sai Sudharsan"        : "B Sai Sudharsan",
+    "Shahrukh Khan"        : "M Shahrukh Khan",
+    "Manav Suthar"         : "MJ Suthar",
+    "Anuj Rawat"           : "Anuj Rawat",
+    "Gerald Coetzee"       : "G Coetzee",
+    "Nandre Burger"        : "N Burger",
+    "Kumar Kushagra"       : "Kumar Kushagra",
+    "Karim Janat"          : "Karim Janat",
 
-    # DC
-    "kl rahul": "kl rahul",
-    "da warner": "david warner",
-    "mr marsh": "mitchell marsh",
-    "pp shaw": "prithvi shaw",
-    "ar patel": "axar patel",
-    "km jadhav": "kedar jadhav",
-    "kk nair": "karun nair",
-    "m starc": "mitchell starc",
-    "k yadav": "kuldeep yadav",
-    "l ngidi": "lungi ngidi",
+    # ── Lucknow Super Giants ──────────────────────────────────────────────────
+    "Rishabh Pant"         : "RR Pant",
+    "Nicholas Pooran"      : "N Pooran",
+    "Aiden Markram"        : "AK Markram",
+    "Avesh Khan"           : "Avesh Khan",
+    "Mohsin Khan"          : "Mohsin Khan",
+    "Mitchell Marsh"       : "MR Marsh",
+    "Wanindu Hasaranga"    : "PW Hasaranga",
+    "Mayank Yadav"         : "MP Yadav",
+    "Ayush Badoni"         : "A Badoni",
+    "Josh Inglis"          : "JP Inglis",
+    "Abdul Samad"          : "Abdul Samad",
+    "Akash Deep"           : "Akash Deep",
+    "Ravi Bishnoi"         : "Ravi Bishnoi",
+    "David Warner"         : "DA Warner",
+    "Marcus Stoinis"       : "MP Stoinis",
+    "Deepak Hooda"         : "DJ Hooda",
+    "Piyush Chawla"        : "PP Chawla",
 
-    # PBKS
-    "ls livingstone": "liam livingstone",
-    "sm hardie": "sam hardie",
-    "jm sharma": "jitesh sharma",
-    "arshdeep singh": "arshdeep singh",
-    "k rabada": "kagiso rabada",
-    "yj chahal": "yuzvendra chahal",
-    "yu chahal": "yuzvendra chahal",
-    "m jansen": "marco jansen",
-    "m stoinis": "marcus stoinis",
-
-    # GT
-    "ss gill": "shubman gill",
-    "wc saha": "wriddhiman saha",
-    "r tewatia": "rahul tewatia",
-    "r khan": "rashid khan",
-    "da miller": "david miller",
-    "jc buttler": "jos buttler",
-    "ws sundar": "washington sundar",
-    "mj siraj": "mohammed siraj",
-    "pk krishna": "prasidh krishna",
-    "i sharma": "ishant sharma",
-
-    # LSG
-    "r pant": "rishabh pant",
-    "kl rahul": "kl rahul",
-    "n pooran": "nicholas pooran",
-    "a markram": "aiden markram",
-    "ma wood": "mark wood",
-    "a nortje": "anrich nortje",
-    "m shami": "mohammed shami",
-    "avesh khan": "avesh khan",
-    "mohsin khan": "mohsin khan",
-    "mp stoinis": "marcus stoinis",
-    "k gowtham": "krishnappa gowtham",
-
-    # RR
-    "yb jaiswal": "yashasvi jaiswal",
-    "sv samson": "sanju samson",
-    "jc archer": "jofra archer",
-    "jr buttler": "jos buttler",
-    "r parag": "riyan parag",
-    "s hetmyer": "shimron hetmyer",
-    "r bishnoi": "ravi bishnoi",
-    "s sharma": "sandeep sharma",
-    "d jurel": "dhruv jurel",
-
-    # Common international players
-    "ab de villiers": "ab de villiers",
-    "ch gayle": "chris gayle",
-    "kc sangakkara": "kumar sangakkara",
-    "dpmd jayawardene": "mahela jayawardene",
-    "kp pietersen": "kevin pietersen",
-    "ac gilchrist": "adam gilchrist",
-    "bb mccullum": "brendon mccullum",
-    "sr watson": "shane watson",
-    "mj guptill": "martin guptill",
-    "tm dilshan": "tillakaratne dilshan",
-    "se marsh": "shaun marsh",
-    "jp faulkner": "james faulkner",
-    "nj reardon": "nathan reardon",
-    "gr maxwell": "glenn maxwell",
-    "aj finch": "aaron finch",
-    "mp stoinis": "marcus stoinis",
-    "dj malan": "dawid malan",
-    "t banton": "tom banton",
-    "jm bairstow": "jonny bairstow",
-    "je root": "joe root",
-    "ba stokes": "ben stokes",
-    "jc buttler": "jos buttler",
-    "mm ali": "moeen ali",
-    "tc bruce": "tom bruce",
-    "gh phillips": "glenn phillips",
-    "tm southee": "tim southee",
-    "ta boult": "trent boult",
-    "mj santner": "mitchell santner",
-    "is sodhi": "ish sodhi",
-    "fh edwards": "fidel edwards",
-    "dj sammy": "darren sammy",
-
-    # Additional common players
-    "kr sharma": "kieron sharma",
-    "a badoni": "ayush badoni",
-    "b sai sudharsan": "sai sudharsan",
-    "at rayudu": "ambati rayudu",
-    "ka pollard": "kieron pollard",
-    "lmp simmons": "lendl simmons",
+    # ── Rajasthan Royals ─────────────────────────────────────────────────────
+    "Yashasvi Jaiswal"     : "YBK Jaiswal",
+    "Riyan Parag"          : "R Parag",
+    "Jofra Archer"         : "JC Archer",
+    "Shimron Hetmyer"      : "SO Hetmyer",
+    "Dhruv Jurel"          : "Dhruv Jurel",
+    "Vaibhav Suryavanshi"  : "V Suryavanshi",
+    "Sandeep Sharma"       : "Sandeep Sharma",
+    "Tushar Deshpande"     : "TU Deshpande",
+    "Sanju Samson"         : "SV Samson",
+    "Jos Buttler"          : "JC Buttler",
+    "Trent Boult"          : "TA Boult",
+    "Shimran Hetmyer"      : "SO Hetmyer",
+    "Navdeep Saini"        : "NA Saini",
+    "Kuldeep Sen"          : "KR Sen",
+    "Tanush Kotian"        : "Tanush Kotian",
+    "Yudhvir Singh"        : "Yudhvir Singh",
 }
 
-# Reverse mapping: full_name -> cricsheet_name
-FULL_TO_CRICSHEET = {v: k for k, v in MANUAL_CRICSHEET_TO_FULL.items()}
+# ── ALSO build reverse: cricsheet exact → cricsheet exact (normalize casing) ──
+# Handles "v kohli" → "V Kohli", "jj bumrah" → "JJ Bumrah"
+# Built at module load from the deliveries file
 
-# ══════════════════════════════════════════════════════════════════════════════
-# NORMALIZATION FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def normalize_name(name: str) -> str:
-    """
-    Normalize a player name for consistent comparison.
-
-    Steps:
-    1. Convert to lowercase
-    2. Strip whitespace
-    3. Remove dots and hyphens
-    4. Collapse multiple spaces
-
-    Args:
-        name: Raw player name
-
-    Returns:
-        Normalized name string
-
-    Examples:
-        >>> normalize_name("JJ Bumrah")
-        'jj bumrah'
-        >>> normalize_name("M.S. Dhoni")
-        'ms dhoni'
-        >>> normalize_name("de Kock")
-        'de kock'
-    """
-    if not isinstance(name, str):
-        return str(name).lower().strip() if name is not None else ""
-
-    name = name.lower().strip()
-    name = name.replace(".", "")
-    name = name.replace("-", " ")
-    name = name.replace("'", "")
-    name = " ".join(name.split())  # collapse multiple spaces
-
-    return name
-
-
-def extract_surname(name: str) -> str:
-    """Extract surname (last word) from a name."""
-    parts = normalize_name(name).split()
-    return parts[-1] if parts else ""
-
-
-def extract_initials(name: str) -> str:
-    """Extract initials from first/middle names."""
-    parts = normalize_name(name).split()
-    if len(parts) <= 1:
-        return ""
-    return "".join([p[0] for p in parts[:-1]])
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NAME MAPPING CACHE
-# ══════════════════════════════════════════════════════════════════════════════
-
+_CRICSHEET_NORM_TO_EXACT: Dict[str, str] = {}   # "v kohli" -> "V Kohli"
+_FULL_NORM_TO_CRICSHEET: Dict[str, str] = {}     # "virat kohli" -> "V Kohli"
+_deliveries_players: Set[str] = set()
+_squad_cache: Dict[str, List[str]] = {}
+_all_squad_players: Set[str] = set()
 _name_map_cache: Dict[str, Optional[str]] = {}
-_cricsheet_players: Set[str] = set()
-_master_players: Set[str] = set()
 
 
-def load_cricsheet_players() -> Set[str]:
-    """Load all unique player names from cricsheet data (deliveries.csv)."""
-    global _cricsheet_players
+# ══════════════════════════════════════════════════════════════════════════════
+# INITIALIZATION — build lookup tables from deliveries on first import
+# ══════════════════════════════════════════════════════════════════════════════
 
-    if _cricsheet_players:
-        return _cricsheet_players
+def _load_deliveries_players() -> Set[str]:
+    """Load all unique player names from deliveries_clean.csv (the ground truth)."""
+    global _deliveries_players, _CRICSHEET_NORM_TO_EXACT
+    if _deliveries_players:
+        return _deliveries_players
 
-    for path in ["data/deliveries_clean.csv", "data/deliveries.csv"]:
+    for path in [
+        os.path.join(DATA_DIR, "deliveries_clean.csv"),
+        os.path.join(DATA_DIR, "deliveries.csv"),
+        "data/deliveries_clean.csv",
+        "data/deliveries.csv",
+    ]:
         if os.path.exists(path):
             try:
                 df = pd.read_csv(path, low_memory=False, usecols=["batter", "bowler"])
                 batters = set(df["batter"].dropna().unique())
                 bowlers = set(df["bowler"].dropna().unique())
-                _cricsheet_players = batters | bowlers
-                return _cricsheet_players
+                _deliveries_players = batters | bowlers
+                # Build normalized → exact lookup
+                _CRICSHEET_NORM_TO_EXACT = {
+                    _norm(p): p for p in _deliveries_players
+                }
+                print(f"[NAME_RESOLVER] Loaded {len(_deliveries_players)} players "
+                      f"from {path}")
+                return _deliveries_players
             except Exception as e:
-                print(f"[WARNING] Could not load cricsheet players: {e}")
+                print(f"[NAME_RESOLVER][WARN] Could not load {path}: {e}")
 
+    print("[NAME_RESOLVER][WARN] No deliveries file found — name resolution limited.")
     return set()
 
 
-def load_name_map() -> Dict[str, Optional[str]]:
-    """Load name mapping from JSON file if it exists."""
-    global _name_map_cache
+def _build_full_norm_map() -> None:
+    """Build normalized full-name → cricsheet-name lookup from FULL_TO_CRICSHEET."""
+    global _FULL_NORM_TO_CRICSHEET
+    _FULL_NORM_TO_CRICSHEET = {
+        _norm(full): cs for full, cs in FULL_TO_CRICSHEET.items()
+    }
 
+
+def _norm(name: str) -> str:
+    """Normalize: lowercase, strip dots and extra spaces."""
+    if not isinstance(name, str):
+        return ""
+    n = name.lower().strip()
+    n = n.replace(".", "").replace("-", " ").replace("'", "")
+    return " ".join(n.split())
+
+
+def _load_squads() -> Dict[str, List[str]]:
+    global _squad_cache, _all_squad_players
+    if _squad_cache:
+        return _squad_cache
+
+    search_paths = [
+        SQUADS_JSON_PATH,
+        os.path.join(os.path.dirname(__file__), "ipl_2026_team_squads.json"),
+        os.path.join(DATA_DIR, "ipl_2026_team_squads.json"),
+        "ipl_2026_team_squads.json",
+    ]
+    for path in search_paths:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            for team, players in raw.items():
+                clean = [re.sub(r"\s*\(c\)\s*$", "", p).strip() for p in players]
+                _squad_cache[team] = clean
+                _all_squad_players.update(clean)
+            print(f"[NAME_RESOLVER] Loaded {len(_all_squad_players)} 2026 squad "
+                  f"players from {path}")
+            return _squad_cache
+    return {}
+
+
+def _load_name_map() -> Dict[str, Optional[str]]:
+    global _name_map_cache
     if _name_map_cache:
         return _name_map_cache
-
     if os.path.exists(NAME_MAP_PATH):
         try:
             with open(NAME_MAP_PATH, "r", encoding="utf-8") as f:
                 _name_map_cache = json.load(f)
-            print(f"[NAME_RESOLVER] Loaded {len(_name_map_cache)} mappings from {NAME_MAP_PATH}")
-        except Exception as e:
-            print(f"[WARNING] Could not load name map: {e}")
+            print(f"[NAME_RESOLVER] Loaded {len(_name_map_cache)} cached mappings.")
+        except Exception:
             _name_map_cache = {}
-
     return _name_map_cache
 
 
-def save_name_map(name_map: Dict[str, Optional[str]] = None) -> None:
-    """Save name mapping to JSON file."""
-    global _name_map_cache
-
-    if name_map is None:
-        name_map = _name_map_cache
-
+def save_name_map() -> None:
     os.makedirs(os.path.dirname(NAME_MAP_PATH) or ".", exist_ok=True)
-
     with open(NAME_MAP_PATH, "w", encoding="utf-8") as f:
-        json.dump(name_map, f, indent=2, ensure_ascii=False)
+        json.dump(_name_map_cache, f, indent=2, ensure_ascii=False)
 
-    print(f"[NAME_RESOLVER] Saved {len(name_map)} mappings to {NAME_MAP_PATH}")
+
+# Initialise on import
+_load_deliveries_players()
+_build_full_norm_map()
+_load_name_map()
+_load_squads()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FUZZY MATCHING
-# ══════════════════════════════════════════════════════════════════════════════
-
-def fuzzy_match(name: str, candidates: Set[str], threshold: int = FUZZY_THRESHOLD) -> Tuple[Optional[str], int]:
-    """
-    Find best fuzzy match for a name among candidates.
-
-    Args:
-        name: Name to match
-        candidates: Set of candidate names to match against
-        threshold: Minimum match score (0-100)
-
-    Returns:
-        Tuple of (matched_name, score) or (None, 0) if no match
-    """
-    try:
-        from rapidfuzz import process, fuzz
-
-        if not candidates:
-            return None, 0
-
-        name_norm = normalize_name(name)
-        candidates_list = list(candidates)
-
-        # Try exact surname match first (more reliable)
-        surname = extract_surname(name)
-        surname_matches = [c for c in candidates_list if extract_surname(c) == surname]
-
-        if surname_matches:
-            # Among surname matches, find best overall match
-            result = process.extractOne(
-                name_norm,
-                [normalize_name(c) for c in surname_matches],
-                scorer=fuzz.WRatio
-            )
-            if result and result[1] >= threshold:
-                # Return original name (not normalized)
-                idx = [normalize_name(c) for c in surname_matches].index(result[0])
-                return surname_matches[idx], result[1]
-
-        # Fallback to general fuzzy match
-        result = process.extractOne(
-            name_norm,
-            [normalize_name(c) for c in candidates_list],
-            scorer=fuzz.WRatio
-        )
-
-        if result and result[1] >= threshold:
-            idx = [normalize_name(c) for c in candidates_list].index(result[0])
-            return candidates_list[idx], result[1]
-
-        return None, 0
-
-    except ImportError:
-        print("[WARNING] rapidfuzz not installed. Fuzzy matching disabled.")
-        return None, 0
-
-
-def surname_initial_match(full_name: str, cricsheet_players: Set[str]) -> Optional[str]:
-    """
-    Match using surname + initial pattern.
-
-    Example: "Jasprit Bumrah" matches "JJ Bumrah" (same surname, initials start with J)
-    """
-    full_norm = normalize_name(full_name)
-    parts = full_norm.split()
-
-    if len(parts) < 2:
-        return None
-
-    surname = parts[-1]
-    first_initial = parts[0][0] if parts[0] else ""
-
-    for cs_name in cricsheet_players:
-        cs_norm = normalize_name(cs_name)
-        cs_parts = cs_norm.split()
-
-        if len(cs_parts) < 2:
-            continue
-
-        cs_surname = cs_parts[-1]
-        cs_initials = cs_parts[0]
-
-        # Check same surname and initials start with same letter
-        if cs_surname == surname and cs_initials and cs_initials[0] == first_initial:
-            return cs_name
-
-    return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CORE RESOLUTION FUNCTIONS
+# CORE: resolve_name
+# Returns the CRICSHEET name (deliveries key), not the full squad name.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def resolve_name(raw_name: str, use_cache: bool = True) -> Optional[str]:
     """
-    Resolve any name format to cricsheet name.
-
-    Resolution order:
-    1. Check cache
-    2. Check manual mapping (both directions)
-    3. Check exact match in cricsheet data
-    4. Try surname+initial match
-    5. Try fuzzy match
-    6. Return None (new player)
-
-    Args:
-        raw_name: Player name in any format
-        use_cache: Whether to use/update cache
+    Resolve any player name to the exact string used in deliveries_clean.csv.
 
     Returns:
-        Cricsheet name or None if not found
-    """
-    global _name_map_cache
+        The cricsheet-format name as stored in deliveries (e.g. "V Kohli")
+        or None if the player is not found anywhere in the data.
 
+    Examples:
+        resolve_name("V Kohli")        → "V Kohli"    (exact match)
+        resolve_name("Virat Kohli")    → "V Kohli"    (full → cricsheet)
+        resolve_name("v kohli")        → "V Kohli"    (case fix)
+        resolve_name("Jasprit Bumrah") → "JJ Bumrah"  (full → cricsheet)
+        resolve_name("JJ Bumrah")      → "JJ Bumrah"  (exact match)
+        resolve_name("MS Dhoni")       → "MS Dhoni"   (exact match)
+    """
     if not raw_name or not isinstance(raw_name, str):
         return None
 
     raw_name = raw_name.strip()
-    norm_name = normalize_name(raw_name)
+    n = _norm(raw_name)
 
-    # 1. Check cache
+    # ── 1. Exact match in deliveries ─────────────────────────────────────────
+    if raw_name in _deliveries_players:
+        return raw_name
+
+    # ── 2. Cache ──────────────────────────────────────────────────────────────
+    if use_cache and raw_name in _name_map_cache:
+        return _name_map_cache[raw_name]
+
+    result = _resolve_uncached(raw_name, n)
+
     if use_cache:
-        load_name_map()
-        if raw_name in _name_map_cache:
-            return _name_map_cache[raw_name]
-        if norm_name in _name_map_cache:
-            return _name_map_cache[norm_name]
+        _name_map_cache[raw_name] = result
 
-    # Load cricsheet players
-    cricsheet_players = load_cricsheet_players()
-    cricsheet_norm = {normalize_name(p): p for p in cricsheet_players}
+    return result
 
-    # 2. Check exact match in cricsheet (normalized)
-    if norm_name in cricsheet_norm:
-        result = cricsheet_norm[norm_name]
-        if use_cache:
-            _name_map_cache[raw_name] = result
-        return result
 
-    # 3. Check manual mapping (full name -> cricsheet format)
-    if norm_name in FULL_TO_CRICSHEET:
-        cs_norm = FULL_TO_CRICSHEET[norm_name]
-        if cs_norm in cricsheet_norm:
-            result = cricsheet_norm[cs_norm]
-            if use_cache:
-                _name_map_cache[raw_name] = result
-            return result
+def _resolve_uncached(raw_name: str, n: str) -> Optional[str]:
+    """Internal: try all resolution strategies in order."""
 
-    # 4. Check manual mapping (cricsheet -> full, reverse lookup)
-    if norm_name in MANUAL_CRICSHEET_TO_FULL:
-        # The input is already in cricsheet format
-        if norm_name in cricsheet_norm:
-            result = cricsheet_norm[norm_name]
-            if use_cache:
-                _name_map_cache[raw_name] = result
-            return result
+    # ── 3. Normalized exact match in deliveries ───────────────────────────────
+    if n in _CRICSHEET_NORM_TO_EXACT:
+        return _CRICSHEET_NORM_TO_EXACT[n]
 
-    # 5. Try surname + initial match
-    surname_match = surname_initial_match(raw_name, cricsheet_players)
-    if surname_match:
-        if use_cache:
-            _name_map_cache[raw_name] = surname_match
-        return surname_match
+    # ── 4. FULL_TO_CRICSHEET manual map ───────────────────────────────────────
+    if n in _FULL_NORM_TO_CRICSHEET:
+        cs_name = _FULL_NORM_TO_CRICSHEET[n]
+        # Verify this cricsheet name actually exists in deliveries
+        if cs_name in _deliveries_players:
+            return cs_name
+        # Try normalized lookup in case of slight casing difference
+        cs_norm = _norm(cs_name)
+        if cs_norm in _CRICSHEET_NORM_TO_EXACT:
+            return _CRICSHEET_NORM_TO_EXACT[cs_norm]
+        # Return the mapped name even if not in deliveries (new player)
+        return cs_name
 
-    # 6. Try fuzzy match
-    fuzzy_result, score = fuzzy_match(raw_name, cricsheet_players)
+    # ── 5. Surname + first initial heuristic ─────────────────────────────────
+    # "Jasprit Bumrah" → look for any "X Bumrah" or "XX Bumrah" in deliveries
+    si_result = _surname_initial_heuristic(raw_name, n)
+    if si_result:
+        return si_result
+
+    # ── 6. Single surname match (only if unique) ──────────────────────────────
+    surname_result = _unique_surname_match(n)
+    if surname_result:
+        return surname_result
+
+    # ── 7. Fuzzy match ────────────────────────────────────────────────────────
+    fuzzy_result = _fuzzy_match(raw_name, _deliveries_players)
     if fuzzy_result:
-        if use_cache:
-            _name_map_cache[raw_name] = fuzzy_result
         return fuzzy_result
 
-    # 7. Not found (new player)
-    if use_cache:
-        _name_map_cache[raw_name] = None
     return None
 
 
+def _surname_initial_heuristic(raw_name: str, n: str) -> Optional[str]:
+    """
+    For "Jasprit Bumrah" try to find "JJ Bumrah" or "J Bumrah" in deliveries.
+    Matches on: same surname AND same first initial.
+    """
+    parts = n.split()
+    if len(parts) < 2:
+        return None
+
+    surname      = parts[-1]
+    first_initial = parts[0][0] if parts[0] else ""
+
+    candidates = []
+    for cs_name in _deliveries_players:
+        cs_parts = _norm(cs_name).split()
+        if not cs_parts:
+            continue
+        cs_surname = cs_parts[-1]
+        if cs_surname != surname:
+            continue
+        # Initials block: e.g. "JJ" or "J" from "JJ Bumrah"
+        if len(cs_parts) >= 2:
+            cs_initials = cs_parts[0]  # "jj" from "jj bumrah"
+            if cs_initials and cs_initials[0] == first_initial:
+                candidates.append(cs_name)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        # Prefer the one whose initials length matches input
+        input_first = parts[0]
+        for c in candidates:
+            c_parts = _norm(c).split()
+            if c_parts[0] == input_first:
+                return c
+        # Return shortest initials match (most common format)
+        return sorted(candidates, key=lambda x: len(x))[0]
+
+    return None
+
+
+def _unique_surname_match(n: str) -> Optional[str]:
+    """
+    If input is just a surname or the surname uniquely identifies one player,
+    return that player. E.g. "Bumrah" → "JJ Bumrah".
+    """
+    parts = n.split()
+    surname = parts[-1]
+
+    matches = [
+        p for p in _deliveries_players
+        if _norm(p).split()[-1] == surname
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _fuzzy_match(name: str, candidates: Set[str],
+                 threshold: int = FUZZY_THRESHOLD) -> Optional[str]:
+    try:
+        from rapidfuzz import process, fuzz
+        if not candidates:
+            return None
+        name_n     = _norm(name)
+        cand_list  = list(candidates)
+        cand_norms = [_norm(c) for c in cand_list]
+
+        # Surname-first pass
+        parts   = name_n.split()
+        surname = parts[-1] if parts else ""
+        sub_idx = [i for i, cn in enumerate(cand_norms)
+                   if cn.split()[-1] == surname] if surname else []
+
+        if sub_idx:
+            sub_norms = [cand_norms[i] for i in sub_idx]
+            sub_orig  = [cand_list[i]  for i in sub_idx]
+            res = process.extractOne(name_n, sub_norms, scorer=fuzz.WRatio)
+            if res and res[1] >= threshold:
+                return sub_orig[sub_norms.index(res[0])]
+
+        res = process.extractOne(name_n, cand_norms, scorer=fuzz.WRatio)
+        if res and res[1] >= threshold:
+            return cand_list[cand_norms.index(res[0])]
+    except ImportError:
+        pass
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_team_squad(team: str) -> List[str]:
+    """Return squad list for a team from ipl_2026_team_squads.json."""
+    squads = _load_squads()
+    if team in squads:
+        return squads[team]
+    tl = team.strip().lower()
+    for k, v in squads.items():
+        if k.lower() == tl:
+            return v
+    return []
+
+
+def get_all_2026_players() -> Set[str]:
+    _load_squads()
+    return set(_all_squad_players)
+
+
 def get_cricsheet_name(full_name: str) -> Optional[str]:
-    """
-    Get cricsheet name for a full name (convenience wrapper).
-
-    Args:
-        full_name: Full player name (e.g., "Jasprit Bumrah")
-
-    Returns:
-        Cricsheet name (e.g., "JJ Bumrah") or None
-    """
+    """Alias for resolve_name — backward compatibility."""
     return resolve_name(full_name)
 
 
 def resolve_squad_names(squad: List[str]) -> Dict[str, Optional[str]]:
-    """
-    Resolve all names in a squad to cricsheet format.
-
-    Args:
-        squad: List of player names
-
-    Returns:
-        Dict mapping original names to cricsheet names
-    """
+    """Resolve every name in a list. Returns {original: cricsheet_or_None}."""
     return {name: resolve_name(name) for name in squad}
 
-# ══════════════════════════════════════════════════════════════════════════════
-# BUILD COMPLETE MAPPING
-# ══════════════════════════════════════════════════════════════════════════════
 
-def build_name_mapping(squad_file: str = None, save: bool = True) -> Dict[str, Optional[str]]:
-    """
-    Build complete name mapping from squad data.
-
-    Args:
-        squad_file: Path to squad markdown file (optional)
-        save: Whether to save mapping to JSON
-
-    Returns:
-        Complete name mapping dict
-    """
-    global _name_map_cache
-
-    print("\n" + "=" * 60)
-    print("  PITCHMIND — Building Player Name Mapping")
-    print("=" * 60)
-
-    # Load cricsheet players
-    cricsheet_players = load_cricsheet_players()
-    print(f"\n[1] Loaded {len(cricsheet_players)} players from Cricsheet data")
-
-    # Parse squad file if provided
-    squad_names = []
-    if squad_file and os.path.exists(squad_file):
-        try:
-            with open(squad_file, "r", encoding="utf-8") as f:
-                content = f.read()
-
-            # Extract player names from markdown table format
-            # Pattern: | Player Name | Role | ...
-            lines = content.split("\n")
-            for line in lines:
-                if line.startswith("|") and "Player Name" not in line and "---" not in line:
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) >= 2 and parts[1]:
-                        name = parts[1].strip()
-                        if name and not name.startswith("**"):
-                            squad_names.append(name)
-
-            print(f"[2] Parsed {len(squad_names)} players from squad file")
-
-        except Exception as e:
-            print(f"[WARNING] Could not parse squad file: {e}")
-
-    # Build mapping
-    mapping = {}
-    exact_matches = 0
-    manual_matches = 0
-    fuzzy_matches = 0
-    unmatched = []
-
-    for name in squad_names:
-        result = resolve_name(name, use_cache=False)
-        mapping[name] = result
-
-        if result:
-            norm = normalize_name(name)
-            cs_norm = normalize_name(result)
-
-            if norm == cs_norm:
-                exact_matches += 1
-            elif norm in FULL_TO_CRICSHEET or norm in MANUAL_CRICSHEET_TO_FULL:
-                manual_matches += 1
-            else:
-                fuzzy_matches += 1
-        else:
-            unmatched.append(name)
-
-    # Update cache
-    _name_map_cache.update(mapping)
-
-    # Print stats
-    print(f"\n[3] Resolution Results:")
-    print(f"    - Exact matches:  {exact_matches}")
-    print(f"    - Manual mapped:  {manual_matches}")
-    print(f"    - Fuzzy matched:  {fuzzy_matches}")
-    print(f"    - Total matched:  {exact_matches + manual_matches + fuzzy_matches}")
-    print(f"    - Unmatched (new): {len(unmatched)}")
-
-    if unmatched and len(unmatched) <= 20:
-        print(f"\n[4] Unmatched players (no history):")
-        for name in unmatched[:20]:
-            print(f"    - {name}")
-
-    # Save if requested
-    if save:
-        save_name_map(_name_map_cache)
-
-    return mapping
+def is_2026_player(name: str) -> bool:
+    return resolve_name(name) is not None
 
 
 def get_resolution_stats() -> Dict:
-    """Get statistics about name resolution."""
-    cricsheet = load_cricsheet_players()
-    name_map = load_name_map()
-
-    matched = sum(1 for v in name_map.values() if v is not None)
-    unmatched = sum(1 for v in name_map.values() if v is None)
-
+    players = _load_deliveries_players()
     return {
-        "cricsheet_players": len(cricsheet),
-        "mapped_names": len(name_map),
-        "matched": matched,
-        "unmatched": unmatched,
-        "match_rate": f"{matched / max(len(name_map), 1) * 100:.1f}%"
+        "deliveries_players" : len(players),
+        "squad_2026_players" : len(get_all_2026_players()),
+        "manual_mappings"    : len(FULL_TO_CRICSHEET),
+        "cached_resolutions" : len(_name_map_cache),
+        "matched"            : sum(1 for v in _name_map_cache.values() if v),
+        "unmatched"          : sum(1 for v in _name_map_cache.values() if not v),
     }
+
+
+def build_name_mapping(save: bool = True) -> Dict[str, Optional[str]]:
+    """
+    Build complete mapping for all 2026 squad players.
+    Saves to data/name_map.json.
+    """
+    global _name_map_cache
+    print("\n" + "=" * 60)
+    print("  PITCHMIND — Building Name Mapping (v4 Deliveries-First)")
+    print("=" * 60)
+
+    squads = _load_squads()
+    if not squads:
+        print("[ERROR] No squads loaded.")
+        return {}
+
+    players = _load_deliveries_players()
+    print(f"  Deliveries players : {len(players)}")
+    print(f"  2026 squad players : {len(_all_squad_players)}")
+    print()
+
+    exact, manual, heuristic, fuzzy_ct, unmatched_list = 0, 0, 0, 0, []
+
+    for team, squad in squads.items():
+        for player in squad:
+            n = _norm(player)
+            cs = None
+
+            # Exact in deliveries
+            if player in players:
+                cs = player; exact += 1
+            elif n in _CRICSHEET_NORM_TO_EXACT:
+                cs = _CRICSHEET_NORM_TO_EXACT[n]; exact += 1
+            # Manual map
+            elif n in _FULL_NORM_TO_CRICSHEET:
+                cs = _FULL_NORM_TO_CRICSHEET[n]; manual += 1
+            # Heuristic
+            else:
+                cs = _surname_initial_heuristic(player, n)
+                if cs:
+                    heuristic += 1
+                else:
+                    cs = _fuzzy_match(player, players)
+                    if cs:
+                        fuzzy_ct += 1
+                    else:
+                        unmatched_list.append((team, player))
+
+            _name_map_cache[player] = cs
+
+    total = exact + manual + heuristic + fuzzy_ct
+    print(f"  Exact matches      : {exact}")
+    print(f"  Manual mapped      : {manual}")
+    print(f"  Heuristic matched  : {heuristic}")
+    print(f"  Fuzzy matched      : {fuzzy_ct}")
+    print(f"  ──────────────────────")
+    print(f"  Total resolved     : {total}")
+    print(f"  No data (new/uncap): {len(unmatched_list)}")
+    if unmatched_list:
+        print(f"\n  Players with no historical data:")
+        for team, p in unmatched_list:
+            print(f"    [{team}]  {p}")
+
+    if save:
+        save_name_map()
+
+    return _name_map_cache
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FALLBACK STATS FOR NEW PLAYERS
+# FALLBACK STATS (for new / uncapped players)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_fallback_stats(role: str, team: str, bat_df: pd.DataFrame = None, bowl_df: pd.DataFrame = None) -> Dict:
-    """
-    Get fallback stats for new players without historical data.
-    Uses team/role averages.
-
-    Args:
-        role: Player role (e.g., "Batter", "Bowler", "Allrounder")
-        team: Team name
-        bat_df: Batting stats DataFrame
-        bowl_df: Bowling stats DataFrame
-
-    Returns:
-        Dict with fallback batting and bowling stats
-    """
-    fallback = {"batting": {}, "bowling": {}}
-
-    role_lower = role.lower() if role else ""
-
-    # Default league averages (when no team data)
-    default_batting = {
-        "strike_rate": 130.0,
-        "batting_avg": 25.0,
-        "boundary_pct": 15.0,
-    }
-
-    default_bowling = {
-        "economy": 8.5,
-        "bowling_avg": 28.0,
-        "bowling_sr": 20.0,
-    }
-
-    # If we have dataframes, compute team averages
-    if bat_df is not None and len(bat_df) > 0:
-        # Use overall averages (team-specific would need team column in stats)
-        fallback["batting"] = {
-            "strike_rate": round(bat_df["strike_rate"].mean(), 1),
-            "batting_avg": round(bat_df["batting_avg"].mean(), 1),
-            "boundary_pct": round(bat_df["boundary_pct"].mean(), 1),
-            "is_fallback": True,
-        }
-    else:
-        fallback["batting"] = {**default_batting, "is_fallback": True}
-
-    if bowl_df is not None and len(bowl_df) > 0:
-        fallback["bowling"] = {
-            "economy": round(bowl_df["economy"].mean(), 2),
-            "bowling_avg": round(bowl_df["bowling_avg"].mean(), 1),
-            "bowling_sr": round(bowl_df["bowling_sr"].mean(), 1),
-            "is_fallback": True,
-        }
-    else:
-        fallback["bowling"] = {**default_bowling, "is_fallback": True}
-
-    # Adjust based on role
+def get_fallback_stats(role: str = "", bat_df=None, bowl_df=None) -> Dict:
+    role_lower = role.lower()
+    bat = (
+        {"strike_rate": float(bat_df["strike_rate"].mean()),
+         "batting_avg": float(bat_df["batting_avg"].mean()),
+         "boundary_pct": float(bat_df["boundary_pct"].mean()),
+         "is_fallback": True}
+        if bat_df is not None and len(bat_df) > 0
+        else {"strike_rate": 130.0, "batting_avg": 25.0,
+              "boundary_pct": 15.0, "is_fallback": True}
+    )
+    bowl = (
+        {"economy": float(bowl_df["economy"].mean()),
+         "bowling_avg": float(bowl_df["bowling_avg"].mean()),
+         "bowling_sr": float(bowl_df["bowling_sr"].mean()),
+         "is_fallback": True}
+        if bowl_df is not None and len(bowl_df) > 0
+        else {"economy": 9.8, "bowling_avg": 28.0,
+              "bowling_sr": 20.0, "is_fallback": True}
+    )
     if "bowler" in role_lower and "all" not in role_lower:
-        # Pure bowlers get minimal batting stats
-        fallback["batting"]["strike_rate"] = 90.0
-        fallback["batting"]["batting_avg"] = 8.0
+        bat.update({"strike_rate": 90.0, "batting_avg": 8.0})
     elif "batter" in role_lower and "all" not in role_lower:
-        # Pure batters get minimal bowling stats
-        fallback["bowling"]["economy"] = 10.0
-        fallback["bowling"]["bowling_avg"] = 50.0
+        bowl.update({"economy": 10.0, "bowling_avg": 50.0})
 
-    return fallback
+    return {"batting": bat, "bowling": bowl}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN — Build mapping when run directly
+# MAIN — run to build / test mapping
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import sys
+    build_name_mapping(save=True)
 
-    # Default squad file path
-    squad_file = "Squad_Data/IPL 2026 Squads — Quick Navigation 3263781c88e08017814dd5af05018b2e.md"
+    print("\n[TEST] Sample resolutions (should all return cricsheet format):")
+    tests = [
+        # Full name → should return cricsheet key
+        ("Virat Kohli",         "V Kohli"),
+        ("Jasprit Bumrah",      "JJ Bumrah"),
+        ("Rohit Sharma",        "RG Sharma"),
+        ("Shubman Gill",        "Shubman Gill"),
+        ("MS Dhoni",            "MS Dhoni"),
+        ("Travis Head",         "TM Head"),
+        ("Yashasvi Jaiswal",    "YBK Jaiswal"),
+        ("Devdutt Padikkal",    "D Padikkal"),
+        ("Josh Hazlewood",      "JR Hazlewood"),
+        ("Krunal Pandya",       "KH Pandya"),
+        ("Suyash Sharma",       "Suyash Sharma"),
+        ("Rasikh Dar",          "Rasikh Salam"),
+        # Already cricsheet → return as-is
+        ("V Kohli",             "V Kohli"),
+        ("JJ Bumrah",           "JJ Bumrah"),
+        ("RG Sharma",           "RG Sharma"),
+        # Lowercase input → should still resolve
+        ("v kohli",             "V Kohli"),
+        ("ms dhoni",            "MS Dhoni"),
+        # Unknown player → None
+        ("Random Player 9999",  None),
+    ]
 
-    if len(sys.argv) > 1:
-        squad_file = sys.argv[1]
+    passed = 0
+    for name, expected in tests:
+        result = resolve_name(name)
+        ok = "✅" if result == expected else "❌"
+        if result == expected:
+            passed += 1
+        print(f"  {ok}  {name:28s} → {str(result):20s}  (expected: {expected})")
 
-    if os.path.exists(squad_file):
-        build_name_mapping(squad_file, save=True)
-    else:
-        print(f"[ERROR] Squad file not found: {squad_file}")
-        print("        Run with: python name_resolver.py <path_to_squad_md>")
-
-        # Still build basic mapping from manual mappings
-        print("\n[INFO] Building mapping from manual mappings only...")
-        cricsheet = load_cricsheet_players()
-        print(f"Loaded {len(cricsheet)} cricsheet players")
-
-        # Test a few names
-        test_names = ["Jasprit Bumrah", "Virat Kohli", "MS Dhoni", "Rohit Sharma", "Hardik Pandya"]
-        print("\n[TEST] Sample resolutions:")
-        for name in test_names:
-            cs_name = resolve_name(name)
-            print(f"    {name:20} -> {cs_name}")
-
-        save_name_map()
-
-    # Print stats
+    print(f"\n  {passed}/{len(tests)} tests passed")
+    print()
     stats = get_resolution_stats()
-    print(f"\n[STATS] Name Resolution Summary:")
     for k, v in stats.items():
-        print(f"    {k}: {v}")
+        print(f"  {k}: {v}")

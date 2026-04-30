@@ -1,0 +1,17 @@
+python 0_json_to_csv.py
+python 1_data_cleaning.py
+
+python 2_feature_engineering.py
+python 3_train_model.py
+python 5_live_data_fetch.py
+python 6_player_features.py
+python 7_phase_predictor.py
+python build_master_players.py
+
+python debug_missing_matches.py
+python diagnostic_toss_bias.py
+
+python name_resolver.py
+python pitchmind_player_features.py
+
+streamlit run 4_dashboard.py
