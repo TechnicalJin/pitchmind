@@ -142,16 +142,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ── DATA CLEANING HELPER ──────────────────────────────────────────────────────
 def clean_dataframe(df):
-    """Replace dash placeholders with None and coerce numeric columns."""
-    df = df.replace(["\u2014", "\u2013", "\u2012", "\u2010", "\u2015",
-                     "-", "\u2212", ""], None)
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="ignore")
-    return df
+    """Clean dataframe safely for pandas 3.x (production ready)."""
 
+    # Replace dash-like placeholders with None
+    df = df.replace([
+        "\u2014", "\u2013", "\u2012", "\u2010", "\u2015",
+        "-", "\u2212", ""
+    ], None)
+
+    for col in df.columns:
+        # Try converting to numeric
+        converted = pd.to_numeric(df[col], errors="coerce")
+
+        # Only replace column if MOST values are numeric
+        if converted.notna().sum() > 0.7 * len(df):
+            df[col] = converted
+
+    return df
 
 # ── LOAD DATA & MODELS ────────────────────────────────────────────────────────
 @st.cache_data
