@@ -627,17 +627,17 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1082640,2017-05-10,2017,Kanpur,Green Park,gujarat lions,delhi capitals,delhi capitals,field,delhi capitals,normal,0,SS Iyer,YC Barde,AK Chaudhary
 1082641,2017-05-11,2017,Mumbai,Wankhede Stadium,punjab kings,mumbai indians,mumbai indians,field,punjab kings,normal,0,WP Saha,A Deshmukh,A Nand Kishore
 1082642,2017-05-12,2017,Delhi,Feroz Shah Kotla,rising pune supergiant,delhi capitals,delhi capitals,bat,delhi capitals,normal,0,KK Nair,KN Ananthapadmanabhan,CK Nandan
-1082643,2017-05-13,2017,Kanpur,Green Park,gujarat lions,sunrisers hyderabad,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,Mohammed Siraj,AK Chaudhary,Nitin Menon
 1082644,2017-05-13,2017,Kolkata,Eden Gardens,kolkata knight riders,mumbai indians,kolkata knight riders,field,mumbai indians,normal,0,AT Rayudu,A Nand Kishore,S Ravi
-1082646,2017-05-14,2017,Delhi,Feroz Shah Kotla,royal challengers bengaluru,delhi capitals,royal challengers bengaluru,bat,royal challengers bengaluru,normal,0,HV Patel,CK Nandan,C Shamshuddin
+1082643,2017-05-13,2017,Kanpur,Green Park,gujarat lions,sunrisers hyderabad,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,Mohammed Siraj,AK Chaudhary,Nitin Menon
 1082645,2017-05-14,2017,Pune,Maharashtra Cricket Association Stadium,punjab kings,rising pune supergiant,rising pune supergiant,field,rising pune supergiant,normal,0,JD Unadkat,AY Dandekar,A Deshmukh
+1082646,2017-05-14,2017,Delhi,Feroz Shah Kotla,royal challengers bengaluru,delhi capitals,royal challengers bengaluru,bat,royal challengers bengaluru,normal,0,HV Patel,CK Nandan,C Shamshuddin
 1082647,2017-05-16,2017,Mumbai,Wankhede Stadium,rising pune supergiant,mumbai indians,mumbai indians,field,rising pune supergiant,normal,0,Washington Sundar,S Ravi,C Shamshuddin
 1082648,2017-05-17,2017,Bangalore,M Chinnaswamy Stadium,kolkata knight riders,sunrisers hyderabad,kolkata knight riders,field,kolkata knight riders,D/L,1,NM Coulter-Nile,AK Chaudhary,Nitin Menon
 1082649,2017-05-19,2017,Bangalore,M Chinnaswamy Stadium,mumbai indians,kolkata knight riders,mumbai indians,field,mumbai indians,normal,0,KV Sharma,NJ Llong,Nitin Menon
 1082650,2017-05-21,2017,Hyderabad,"Rajiv Gandhi International Stadium, Uppal",rising pune supergiant,mumbai indians,mumbai indians,bat,mumbai indians,normal,0,KH Pandya,NJ Llong,S Ravi
 1136561,2018-04-07,2018,Mumbai,Wankhede Stadium,chennai super kings,mumbai indians,chennai super kings,field,chennai super kings,normal,0,DJ Bravo,CB Gaffaney,A Nand Kishore
-1136562,2018-04-08,2018,Chandigarh,Punjab Cricket Association IS Bindra Stadium,delhi capitals,punjab kings,punjab kings,field,punjab kings,normal,0,KL Rahul,KN Ananthapadmanabhan,RJ Tucker
 1136563,2018-04-08,2018,Kolkata,Eden Gardens,kolkata knight riders,royal challengers bengaluru,kolkata knight riders,field,kolkata knight riders,normal,0,SP Narine,A Deshmukh,C Shamshuddin
+1136562,2018-04-08,2018,Chandigarh,Punjab Cricket Association IS Bindra Stadium,delhi capitals,punjab kings,punjab kings,field,punjab kings,normal,0,KL Rahul,KN Ananthapadmanabhan,RJ Tucker
 1136564,2018-04-09,2018,Hyderabad,Rajiv Gandhi International Stadium,rajasthan royals,sunrisers hyderabad,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,S Dhawan,NJ Llong,VA Kulkarni
 1136565,2018-04-10,2018,Chennai,MA Chidambaram Stadium,kolkata knight riders,chennai super kings,chennai super kings,field,chennai super kings,normal,0,SW Billings,AK Chaudhary,CB Gaffaney
 1136566,2018-04-11,2018,Jaipur,Sawai Mansingh Stadium,delhi capitals,rajasthan royals,delhi capitals,field,rajasthan royals,D/L,1,SV Samson,KN Ananthapadmanabhan,Nitin Menon
@@ -712,8 +712,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1175370,2019-04-03,2019,Mumbai,Wankhede Stadium,mumbai indians,chennai super kings,chennai super kings,field,mumbai indians,normal,0,HH Pandya,BNJ Oxenford,RJ Tucker
 1175371,2019-04-04,2019,Delhi,Arun Jaitley Stadium,sunrisers hyderabad,delhi capitals,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,JM Bairstow,C Shamshuddin,KN Ananthapadmanabhan
 1175372,2019-04-05,2019,Bengaluru,M.Chinnaswamy Stadium,royal challengers bengaluru,kolkata knight riders,kolkata knight riders,field,kolkata knight riders,normal,0,AD Russell,AK Chaudhary,CB Gaffaney
-1178393,2019-04-06,2019,Chennai,MA Chidambaram Stadium,chennai super kings,punjab kings,chennai super kings,bat,chennai super kings,normal,0,Harbhajan Singh,KN Ananthapadmanabhan,RJ Tucker
 1178394,2019-04-06,2019,Hyderabad,Rajiv Gandhi International Stadium,mumbai indians,sunrisers hyderabad,sunrisers hyderabad,field,mumbai indians,normal,0,AS Joseph,AY Dandekar,Nitin Menon
+1178393,2019-04-06,2019,Chennai,MA Chidambaram Stadium,chennai super kings,punjab kings,chennai super kings,bat,chennai super kings,normal,0,Harbhajan Singh,KN Ananthapadmanabhan,RJ Tucker
 1178395,2019-04-07,2019,Bengaluru,M.Chinnaswamy Stadium,delhi capitals,royal challengers bengaluru,delhi capitals,field,delhi capitals,normal,0,K Rabada,S Ravi,YC Barde
 1178396,2019-04-07,2019,Jaipur,Sawai Mansingh Stadium,rajasthan royals,kolkata knight riders,kolkata knight riders,field,kolkata knight riders,normal,0,HF Gurney,AK Chaudhary,CB Gaffaney
 1178397,2019-04-08,2019,Chandigarh,Punjab Cricket Association IS Bindra Stadium,punjab kings,sunrisers hyderabad,punjab kings,field,punjab kings,normal,0,KL Rahul,AY Dandekar,M Erasmus
@@ -723,8 +723,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1178401,2019-04-12,2019,Kolkata,Eden Gardens,delhi capitals,kolkata knight riders,delhi capitals,field,delhi capitals,normal,0,S Dhawan,CK Nandan,YC Barde
 1178402,2019-04-13,2019,Mumbai,Wankhede Stadium,rajasthan royals,mumbai indians,rajasthan royals,field,rajasthan royals,normal,0,JC Buttler,A Nand Kishore,Nitin Menon
 1178403,2019-04-13,2019,Chandigarh,Punjab Cricket Association IS Bindra Stadium,punjab kings,royal challengers bengaluru,royal challengers bengaluru,field,royal challengers bengaluru,normal,0,AB de Villiers,S Ravi,UV Gandhe
-1178404,2019-04-14,2019,Kolkata,Eden Gardens,chennai super kings,kolkata knight riders,chennai super kings,field,chennai super kings,normal,0,Imran Tahir,CK Nandan,RJ Tucker
 1178405,2019-04-14,2019,Hyderabad,Rajiv Gandhi International Stadium,delhi capitals,sunrisers hyderabad,sunrisers hyderabad,field,delhi capitals,normal,0,KMA Paul,AK Chaudhary,BNJ Oxenford
+1178404,2019-04-14,2019,Kolkata,Eden Gardens,chennai super kings,kolkata knight riders,chennai super kings,field,chennai super kings,normal,0,Imran Tahir,CK Nandan,RJ Tucker
 1178406,2019-04-15,2019,Mumbai,Wankhede Stadium,royal challengers bengaluru,mumbai indians,mumbai indians,field,mumbai indians,normal,0,SL Malinga,M Erasmus,Nitin Menon
 1178407,2019-04-16,2019,Chandigarh,Punjab Cricket Association IS Bindra Stadium,rajasthan royals,punjab kings,rajasthan royals,field,punjab kings,normal,0,R Ashwin,AK Chaudhary,VA Kulkarni
 1178408,2019-04-17,2019,Hyderabad,Rajiv Gandhi International Stadium,chennai super kings,sunrisers hyderabad,chennai super kings,bat,sunrisers hyderabad,normal,0,DA Warner,IJ Gould,UV Gandhe
@@ -891,8 +891,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1304060,2022-04-06,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",kolkata knight riders,mumbai indians,kolkata knight riders,field,kolkata knight riders,normal,0,PJ Cummins,BNJ Oxenford,KN Ananthapadmanabhan
 1304061,2022-04-07,2022,Mumbai,"Dr DY Patil Sports Academy, Mumbai",delhi capitals,lucknow super giants,lucknow super giants,field,lucknow super giants,normal,0,Q de Kock,RJ Tucker,Tapan Sharma
 1304062,2022-04-08,2022,Mumbai,"Brabourne Stadium, Mumbai",punjab kings,gujarat titans,gujarat titans,field,gujarat titans,normal,0,Shubman Gill,AK Chaudhary,VK Sharma
-1304064,2022-04-09,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",royal challengers bengaluru,mumbai indians,royal challengers bengaluru,field,royal challengers bengaluru,normal,0,Anuj Rawat,BNJ Oxenford,KN Ananthapadmanabhan
 1304063,2022-04-09,2022,Mumbai,"Dr DY Patil Sports Academy, Mumbai",chennai super kings,sunrisers hyderabad,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,Abhishek Sharma,Navdeep Singh,Nitin Menon
+1304064,2022-04-09,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",royal challengers bengaluru,mumbai indians,royal challengers bengaluru,field,royal challengers bengaluru,normal,0,Anuj Rawat,BNJ Oxenford,KN Ananthapadmanabhan
 1304065,2022-04-10,2022,Mumbai,"Brabourne Stadium, Mumbai",kolkata knight riders,delhi capitals,kolkata knight riders,field,delhi capitals,normal,0,Kuldeep Yadav,CB Gaffaney,J Madanagopal
 1304066,2022-04-10,2022,Mumbai,"Wankhede Stadium, Mumbai",rajasthan royals,lucknow super giants,lucknow super giants,field,rajasthan royals,normal,0,YS Chahal,AK Chaudhary,Tapan Sharma
 1304067,2022-04-11,2022,Mumbai,"Dr DY Patil Sports Academy, Mumbai",sunrisers hyderabad,gujarat titans,sunrisers hyderabad,field,sunrisers hyderabad,normal,0,KS Williamson,Chirra Ravikanthreddy,RJ Tucker
@@ -919,8 +919,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1304088,2022-04-29,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",punjab kings,lucknow super giants,punjab kings,field,lucknow super giants,normal,0,KH Pandya,MA Gough,UV Gandhe
 1304089,2022-04-30,2022,Mumbai,"Brabourne Stadium, Mumbai",gujarat titans,royal challengers bengaluru,royal challengers bengaluru,bat,gujarat titans,normal,0,R Tewatia,HAS Khalid,VK Sharma
 1304090,2022-04-30,2022,Navi Mumbai,"Dr DY Patil Sports Academy, Mumbai",rajasthan royals,mumbai indians,mumbai indians,field,mumbai indians,normal,0,SA Yadav,BNJ Oxenford,YC Barde
-1304091,2022-05-01,2022,Mumbai,"Wankhede Stadium, Mumbai",lucknow super giants,delhi capitals,lucknow super giants,bat,lucknow super giants,normal,0,Mohsin Khan,Chirra Ravikanthreddy,CB Gaffaney
 1304092,2022-05-01,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",sunrisers hyderabad,chennai super kings,sunrisers hyderabad,field,chennai super kings,normal,0,RD Gaikwad,AK Chaudhary,KN Ananthapadmanabhan
+1304091,2022-05-01,2022,Mumbai,"Wankhede Stadium, Mumbai",lucknow super giants,delhi capitals,lucknow super giants,bat,lucknow super giants,normal,0,Mohsin Khan,Chirra Ravikanthreddy,CB Gaffaney
 1304093,2022-05-02,2022,Mumbai,"Wankhede Stadium, Mumbai",rajasthan royals,kolkata knight riders,kolkata knight riders,field,kolkata knight riders,normal,0,RK Singh,J Madanagopal,N Pandit
 1304094,2022-05-03,2022,Navi Mumbai,"Dr DY Patil Sports Academy, Mumbai",punjab kings,gujarat titans,gujarat titans,bat,punjab kings,normal,0,K Rabada,R Pandit,VK Sharma
 1304095,2022-05-04,2022,Pune,"Maharashtra Cricket Association Stadium, Pune",royal challengers bengaluru,chennai super kings,chennai super kings,field,royal challengers bengaluru,normal,0,HV Patel,KN Ananthapadmanabhan,MA Gough
@@ -1175,10 +1175,10 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1527678,2026-04-01,2026,Lucknow,"Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium, Lucknow",delhi capitals,lucknow super giants,delhi capitals,field,delhi capitals,normal,0,Sameer Rizvi,R Pandit,UV Gandhe
 1527679,2026-04-02,2026,Kolkata,"Eden Gardens, Kolkata",kolkata knight riders,sunrisers hyderabad,kolkata knight riders,field,sunrisers hyderabad,normal,0,Nithish Kumar Reddy,MV Saidharshan Kumar,Vinod Seshan
 1527680,2026-04-03,2026,Chennai,"MA Chidambaram Stadium, Chepauk, Chennai",punjab kings,chennai super kings,punjab kings,field,punjab kings,normal,0,Priyansh Arya,Abhijit Bhattacharya,A Totre
-1527682,2026-04-04,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",gujarat titans,rajasthan royals,rajasthan royals,bat,rajasthan royals,normal,0,Ravi Bishnoi,R Pandit,UV Gandhe
 1527681,2026-04-04,2026,Delhi,"Arun Jaitley Stadium, Delhi",mumbai indians,delhi capitals,delhi capitals,field,delhi capitals,normal,0,Sameer Rizvi,HDPK Dharmasena,M Krishnadas
-1527684,2026-04-05,2026,Bengaluru,"M Chinnaswamy Stadium, Bengaluru",royal challengers bengaluru,chennai super kings,chennai super kings,field,royal challengers bengaluru,normal,0,TH David,A Totre,KN Ananthapadmanabhan
+1527682,2026-04-04,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",gujarat titans,rajasthan royals,rajasthan royals,bat,rajasthan royals,normal,0,Ravi Bishnoi,R Pandit,UV Gandhe
 1527683,2026-04-05,2026,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",sunrisers hyderabad,lucknow super giants,lucknow super giants,field,lucknow super giants,normal,0,Mohammed Shami,Anish Sahasrabudhe,MV Saidharshan Kumar
+1527684,2026-04-05,2026,Bengaluru,"M Chinnaswamy Stadium, Bengaluru",royal challengers bengaluru,chennai super kings,chennai super kings,field,royal challengers bengaluru,normal,0,TH David,A Totre,KN Ananthapadmanabhan
 1527685,2026-04-06,2026,Kolkata,"Eden Gardens, Kolkata",punjab kings,kolkata knight riders,kolkata knight riders,bat,,no result,0,Unknown,A Bengeri,J Madanagopal
 1527686,2026-04-07,2026,Guwahati,"Barsapara Cricket Stadium, Guwahati",mumbai indians,rajasthan royals,mumbai indians,field,rajasthan royals,normal,0,YBK Jaiswal,HDPK Dharmasena,M Krishnadas
 1527687,2026-04-08,2026,Delhi,"Arun Jaitley Stadium, Delhi",gujarat titans,delhi capitals,delhi capitals,field,gujarat titans,normal,0,Rashid Khan,Anish Sahasrabudhe,Nitin Menon
@@ -1193,8 +1193,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1529266,2026-04-15,2026,Bengaluru,"M Chinnaswamy Stadium, Bengaluru",royal challengers bengaluru,lucknow super giants,royal challengers bengaluru,field,royal challengers bengaluru,normal,0,JR Hazlewood,AT Holdstock,Bhavesh Patel
 1529267,2026-04-16,2026,Mumbai,"Wankhede Stadium, Mumbai",punjab kings,mumbai indians,punjab kings,field,punjab kings,normal,0,Arshdeep Singh,HDPK Dharmasena,M Krishnadas
 1529268,2026-04-17,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",gujarat titans,kolkata knight riders,kolkata knight riders,bat,gujarat titans,normal,0,Shubman Gill,R Pandit,UV Gandhe
-1529270,2026-04-18,2026,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",sunrisers hyderabad,chennai super kings,chennai super kings,field,sunrisers hyderabad,normal,0,E Malinga,Anish Sahasrabudhe,Vinod Seshan
 1529269,2026-04-18,2026,Bengaluru,"M Chinnaswamy Stadium, Bengaluru",royal challengers bengaluru,delhi capitals,delhi capitals,field,delhi capitals,normal,0,T Stubbs,Abhijit Bhattacharya,Bhavesh Patel
+1529270,2026-04-18,2026,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",sunrisers hyderabad,chennai super kings,chennai super kings,field,sunrisers hyderabad,normal,0,E Malinga,Anish Sahasrabudhe,Vinod Seshan
 1529272,2026-04-19,2026,New Chandigarh,"Maharaja Yadavindra Singh International Cricket Stadium, New Chandigarh",lucknow super giants,punjab kings,lucknow super giants,field,punjab kings,normal,0,Priyansh Arya,J Madanagopal,K Kelkar
 1529271,2026-04-19,2026,Kolkata,"Eden Gardens, Kolkata",rajasthan royals,kolkata knight riders,rajasthan royals,bat,kolkata knight riders,normal,0,CV Varun,HDPK Dharmasena,M Krishnadas
 1529273,2026-04-20,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",gujarat titans,mumbai indians,gujarat titans,field,mumbai indians,normal,0,Tilak Varma,Abhijit Bhattacharya,KN Ananthapadmanabhan
@@ -1210,3 +1210,4 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1529283,2026-04-28,2026,New Chandigarh,"Maharaja Yadavindra Singh International Cricket Stadium, New Chandigarh",punjab kings,rajasthan royals,rajasthan royals,field,rajasthan royals,normal,0,D Ferreira,Nitin Menon,TM Srivastava
 1529284,2026-04-29,2026,Mumbai,"Wankhede Stadium, Mumbai",sunrisers hyderabad,mumbai indians,mumbai indians,bat,sunrisers hyderabad,normal,0,H Klaasen,A Bengeri,J Madanagopal
 1529285,2026-04-30,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",royal challengers bengaluru,gujarat titans,gujarat titans,field,gujarat titans,normal,0,JO Holder,AT Holdstock,KN Ananthapadmanabhan
+1529286,2026-05-01,2026,Jaipur,"Sawai Mansingh Stadium, Jaipur",rajasthan royals,delhi capitals,rajasthan royals,bat,delhi capitals,normal,0,KL Rahul,SJ Nogajski,VK Sharma
