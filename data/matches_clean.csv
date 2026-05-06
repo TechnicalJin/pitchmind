@@ -25,8 +25,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1359498,2023-04-17,2023,Bengaluru,"M Chinnaswamy Stadium, Bengaluru",royal challengers bengaluru,chennai super kings,royal challengers bengaluru,field,chennai super kings,normal,0,DP Conway,2023
 1359499,2023-04-18,2023,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",mumbai indians,sunrisers hyderabad,sunrisers hyderabad,field,mumbai indians,normal,0,C Green,2023
 1359500,2023-04-19,2023,Jaipur,"Sawai Mansingh Stadium, Jaipur",rajasthan royals,lucknow super giants,rajasthan royals,field,lucknow super giants,normal,0,MP Stoinis,2023
-1359502,2023-04-20,2023,Delhi,"Arun Jaitley Stadium, Delhi",kolkata knight riders,delhi capitals,delhi capitals,field,delhi capitals,normal,0,I Sharma,2023
 1359501,2023-04-20,2023,Chandigarh,"Punjab Cricket Association IS Bindra Stadium, Mohali, Chandigarh",royal challengers bengaluru,punjab kings,punjab kings,field,royal challengers bengaluru,normal,0,Mohammed Siraj,2023
+1359502,2023-04-20,2023,Delhi,"Arun Jaitley Stadium, Delhi",kolkata knight riders,delhi capitals,delhi capitals,field,delhi capitals,normal,0,I Sharma,2023
 1359503,2023-04-21,2023,Chennai,"MA Chidambaram Stadium, Chepauk, Chennai",sunrisers hyderabad,chennai super kings,chennai super kings,field,chennai super kings,normal,0,RA Jadeja,2023
 1359504,2023-04-22,2023,Lucknow,"Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium, Lucknow",gujarat titans,lucknow super giants,gujarat titans,bat,gujarat titans,normal,0,MM Sharma,2023
 1359505,2023-04-22,2023,Mumbai,"Wankhede Stadium, Mumbai",mumbai indians,punjab kings,mumbai indians,field,punjab kings,normal,0,SM Curran,2023
@@ -234,8 +234,8 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1527687,2026-04-08,2026,Delhi,"Arun Jaitley Stadium, Delhi",gujarat titans,delhi capitals,delhi capitals,field,gujarat titans,normal,0,Rashid Khan,2026
 1527688,2026-04-09,2026,Kolkata,"Eden Gardens, Kolkata",lucknow super giants,kolkata knight riders,lucknow super giants,field,lucknow super giants,normal,0,MD Choudhary,2026
 1527689,2026-04-10,2026,Guwahati,"Barsapara Cricket Stadium, Guwahati",rajasthan royals,royal challengers bengaluru,rajasthan royals,field,rajasthan royals,normal,0,V Suryavanshi,2026
-1527691,2026-04-11,2026,Chennai,"MA Chidambaram Stadium, Chepauk, Chennai",delhi capitals,chennai super kings,delhi capitals,field,chennai super kings,normal,0,SV Samson,2026
 1527690,2026-04-11,2026,New Chandigarh,"Maharaja Yadavindra Singh International Cricket Stadium, New Chandigarh",punjab kings,sunrisers hyderabad,punjab kings,field,punjab kings,normal,0,SS Iyer,2026
+1527691,2026-04-11,2026,Chennai,"MA Chidambaram Stadium, Chepauk, Chennai",delhi capitals,chennai super kings,delhi capitals,field,chennai super kings,normal,0,SV Samson,2026
 1527692,2026-04-12,2026,Lucknow,"Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium, Lucknow",lucknow super giants,gujarat titans,gujarat titans,field,gujarat titans,normal,0,M Prasidh Krishna,2026
 1527693,2026-04-12,2026,Mumbai,"Wankhede Stadium, Mumbai",royal challengers bengaluru,mumbai indians,mumbai indians,field,royal challengers bengaluru,normal,0,PD Salt,2026
 1529264,2026-04-13,2026,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",sunrisers hyderabad,rajasthan royals,rajasthan royals,field,sunrisers hyderabad,normal,0,PP Hinge,2026
@@ -262,5 +262,6 @@ id,date,season,city,venue,team1,team2,toss_winner,toss_decision,winner,result,dl
 1529285,2026-04-30,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",royal challengers bengaluru,gujarat titans,gujarat titans,field,gujarat titans,normal,0,JO Holder,2026
 1529286,2026-05-01,2026,Jaipur,"Sawai Mansingh Stadium, Jaipur",rajasthan royals,delhi capitals,rajasthan royals,bat,delhi capitals,normal,0,KL Rahul,2026
 1529287,2026-05-02,2026,Chennai,"MA Chidambaram Stadium, Chepauk, Chennai",chennai super kings,mumbai indians,mumbai indians,bat,chennai super kings,normal,0,RD Gaikwad,2026
-1529289,2026-05-03,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",punjab kings,gujarat titans,gujarat titans,field,gujarat titans,normal,0,JO Holder,2026
 1529288,2026-05-03,2026,Hyderabad,"Rajiv Gandhi International Stadium, Uppal, Hyderabad",sunrisers hyderabad,kolkata knight riders,sunrisers hyderabad,bat,kolkata knight riders,normal,0,CV Varun,2026
+1529289,2026-05-03,2026,Ahmedabad,"Narendra Modi Stadium, Ahmedabad",punjab kings,gujarat titans,gujarat titans,field,gujarat titans,normal,0,JO Holder,2026
+1529290,2026-05-04,2026,Mumbai,"Wankhede Stadium, Mumbai",lucknow super giants,mumbai indians,mumbai indians,field,mumbai indians,normal,0,RD Rickelton,2026
